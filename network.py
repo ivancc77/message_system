@@ -1,8 +1,7 @@
 """
-Red P2P Completa - VERSION 4.0 (FINAL)
-- Incluye accept_handshake (para que el receptor pueda leer mensajes)
-- Incluye blake2b (fix digest error)
-- Incluye búsqueda flexible de nombres
+Red P2P Completa - VERSION 4.1 (FINAL FIX)
+- Soluciona el error de argumentos en SimpleListener (__call__)
+- Compatible con zeroconf actualizado
 """
 import asyncio
 import socket
@@ -39,17 +38,14 @@ class NoiseIKProtocol:
         ephemeral_private = X25519PrivateKey.generate()
         ephemeral_public = ephemeral_private.public_key()
         
-        # Si es la primera vez, generamos una dummy si no tenemos la key (TOFU)
         if not remote_static_key_bytes:
              remote_static = X25519PrivateKey.generate().public_key() 
         else:
             remote_static = X25519PublicKey.from_public_bytes(remote_static_key_bytes)
         
-        # Cálculo de secretos compartidos (Sender Side)
         es = ephemeral_private.exchange(remote_static)
         ss = self.static_private.exchange(remote_static)
         
-        # KDF usando BLAKE2b (Fix aplicado)
         h = hashlib.blake2b(digest_size=64)
         h.update(b"DNI-IM-NoiseIK-v1") 
         h.update(es)
@@ -57,8 +53,8 @@ class NoiseIKProtocol:
         key_material = h.digest()
         
         session = {
-            'send_cipher': ChaCha20Poly1305(key_material[:32]), # Envío con primera mitad
-            'recv_cipher': ChaCha20Poly1305(key_material[32:64]), # Recibo con segunda mitad
+            'send_cipher': ChaCha20Poly1305(key_material[:32]),
+            'recv_cipher': ChaCha20Poly1305(key_material[32:64]),
             'send_nonce': 0,
             'recv_nonce': 0,
             'remote_fingerprint': remote_fingerprint,
@@ -66,13 +62,11 @@ class NoiseIKProtocol:
         }
         self.sessions[remote_fingerprint] = session
         
-        # Preparar claves públicas para enviar
         ephemeral_bytes = ephemeral_public.public_bytes(
             encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
         static_bytes = self.static_public.public_bytes(
             encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
         
-        # Firma DNIe
         signature = self.dnie.sign_data(static_bytes)
         
         handshake_message = {
@@ -85,17 +79,12 @@ class NoiseIKProtocol:
         
         return msgpack.packb(handshake_message), session
 
-    # --- NUEVA FUNCIÓN CRÍTICA: EL RECEPTOR ACEPTA Y CALCULA CLAVES ---
     def accept_handshake(self, sender_static_bytes, sender_ephemeral_bytes, sender_fp):
         try:
-            # Reconstruir claves públicas del emisor
             sender_static = X25519PublicKey.from_public_bytes(sender_static_bytes)
             sender_ephemeral = X25519PublicKey.from_public_bytes(sender_ephemeral_bytes)
             
-            # Cálculo de secretos (Receiver Side - Espejo del Sender)
-            # es = Mi Estática Privada * Su Efímera Pública
             es = self.static_private.exchange(sender_ephemeral)
-            # ss = Mi Estática Privada * Su Estática Pública
             ss = self.static_private.exchange(sender_static)
             
             h = hashlib.blake2b(digest_size=64)
@@ -104,10 +93,9 @@ class NoiseIKProtocol:
             h.update(ss)
             key_material = h.digest()
             
-            # IMPORTANTE: Las claves se invierten respecto al sender
             session = {
-                'recv_cipher': ChaCha20Poly1305(key_material[:32]), # Recibo lo que él envía
-                'send_cipher': ChaCha20Poly1305(key_material[32:64]), # Envío lo que él recibe
+                'recv_cipher': ChaCha20Poly1305(key_material[:32]),
+                'send_cipher': ChaCha20Poly1305(key_material[32:64]),
                 'send_nonce': 0,
                 'recv_nonce': 0,
                 'remote_fingerprint': sender_fp,
@@ -198,9 +186,10 @@ class SimpleListener(ServiceListener):
     def add_service(self, zc, type_, name):
         asyncio.create_task(self.resolve_async(zc, type_, name))
 
-    def __call__(self, zc, type_, name, state_change):
+    # --- CORRECCIÓN AQUÍ: Argumentos renombrados para coincidir con zeroconf ---
+    def __call__(self, zeroconf, service_type, name, state_change):
         if state_change == ServiceStateChange.Added:
-            self.add_service(zc, type_, name)
+            self.add_service(zeroconf, service_type, name)
     
     async def resolve_async(self, zc, type_, name):
         try:
@@ -252,7 +241,7 @@ class CompleteNetwork:
             return key
 
     async def start(self, username: str):
-        print(f"🚀 Iniciando Red P2P (Version 4.0)...")
+        print(f"🚀 Iniciando Red P2P (Version 4.1)...")
         self.my_name = username
         self.my_fingerprint = self.dnie.get_fingerprint()
         static_private = self._load_identity()
@@ -313,7 +302,7 @@ class CompleteNetwork:
         # 1. Buscar por fingerprint exacto
         peer_info = self.discovered.get(target_fp)
         
-        # 2. Si falla, buscar por nombre (Búsqueda flexible mejorada)
+        # 2. Si falla, buscar por nombre
         if not peer_info:
              target_lower = target_name_or_fp.lower()
              for p in self.discovered.values():
@@ -333,7 +322,6 @@ class CompleteNetwork:
         if not cid:
             cid = self.connection_manager.create_connection(target_fp, peer_info)
             await self._send_handshake(cid, peer_info)
-            # Pequeña pausa para que el handshake se procese
             await asyncio.sleep(0.1)
             
         sid = self.connection_manager.create_stream(cid, 'text')
@@ -366,13 +354,11 @@ class CompleteNetwork:
             content = msgpack.unpackb(payload, raw=False)
             remote_fp = content.get('dnie_fingerprint')
             
-            # Extraer claves públicas
             static_bytes = content.get('static_public')
             ephemeral_bytes = content.get('ephemeral_public')
             
             print(f"🤝 Handshake recibido de {remote_fp[:8]}...")
             
-            # --- PASO CRÍTICO: ACEPTAR Y CALCULAR CLAVES ---
             self.noise.accept_handshake(static_bytes, ephemeral_bytes, remote_fp)
             
             if not self.connection_manager.get_cid_for_peer(remote_fp):
