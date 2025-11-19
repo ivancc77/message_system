@@ -41,7 +41,7 @@ class NoiseIKProtocol:
             remote_static = X25519PublicKey.from_public_bytes(remote_static_key_bytes)
         es = ephemeral_private.exchange(remote_static)
         ss = self.static_private.exchange(remote_static)
-        h = hashlib.blake2s(digest_size=64)
+        h = hashlib.blake2b(digest_size=64)
         h.update(b"DNI-IM-NoiseIK-v1")
         h.update(es)
         h.update(ss)
