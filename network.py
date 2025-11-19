@@ -123,9 +123,10 @@ class NoiseIKProtocol:
         session = self.sessions.get(remote_fingerprint)
         if not session: return plaintext
         try:
-            nonce = session['send_nonce'].to_bytes(12, 'little')
-            session['send_nonce'] += 1
-            return nonce + session['send_cipher'].encrypt(nonce, plaintext, None)
+            # Usamos 12 bytes aleatorios para el nonce (más seguro en UDP)
+            nonce = os.urandom(12)
+            ciphertext = session['send_cipher'].encrypt(nonce, plaintext, None)
+            return nonce + ciphertext # Enviamos NONCE + MENSAJE
         except: return plaintext
 
     def decrypt_message(self, ciphertext: bytes, remote_fingerprint: str) -> bytes:
@@ -134,12 +135,15 @@ class NoiseIKProtocol:
             print("⚠️ No hay sesión para descifrar")
             return ciphertext
         try:
+            # Extraer el nonce de los primeros 12 bytes
             nonce = ciphertext[:12]
-            encrypted = ciphertext[12:]
-            return session['recv_cipher'].decrypt(nonce, encrypted, None)
+            encrypted_payload = ciphertext[12:]
+
+            # Descifrar usando el nonce que venía en el paquete
+            return session['recv_cipher'].decrypt(nonce, encrypted_payload, None)
         except Exception as e: 
-            print(f"⚠️ Error desencriptando: {e}")
-            return b"Error_Decrypt"
+            print(f"⚠️ Error desencriptando (Posible clave incorrecta): {e}")
+            raise e
 
 class ConnectionManager:
     def __init__(self):
