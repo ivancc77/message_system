@@ -1,6 +1,5 @@
 """
-DNIe Real con Smart Card Reader
-Implementación completa PKCS#11 para DNIe español
+DNIe Real - Versión Robusta (Basada en tu código funcional)
 """
 import pkcs11
 from pkcs11 import ObjectClass, Attribute, Mechanism
@@ -8,7 +7,6 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 import hashlib
-import time
 import os
 from typing import Optional, Dict, Any
 from rich.console import Console
@@ -20,394 +18,202 @@ class DNIeReal:
     """Gestor DNIe real con smart card reader"""
     
     def __init__(self, pkcs11_lib_path: Optional[str] = None):
-        # Rutas comunes de librerías PKCS#11 para DNIe
+        # Rutas comunes incluyendo la que usas tú
         self.pkcs11_paths = [
-            pkcs11_lib_path,
-            # Windows
-            'C:/Windows/System32/DNIe_P11.dll',
-            'C:/Windows/System32/opensc-pkcs11.dll',
+            'C:/Archivos de Programa/OpenSC Project/OpenSC/pkcs11/opensc-pkcs11.dll',
             'C:/Program Files/OpenSC Project/OpenSC/pkcs11/opensc-pkcs11.dll',
-            # Linux
-            '/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so',
-            '/usr/lib/opensc-pkcs11.so',
-            '/usr/local/lib/opensc-pkcs11.so',
-            # macOS
-            '/usr/local/lib/opensc-pkcs11.so',
-            '/opt/homebrew/lib/opensc-pkcs11.so'
+            'C:/Windows/System32/opensc-pkcs11.dll',
+            '/usr/lib/opensc-pkcs11.so', # Linux
+            '/usr/local/lib/opensc-pkcs11.so', # Mac
         ]
+        if pkcs11_lib_path:
+            self.pkcs11_paths.insert(0, pkcs11_lib_path)
         
         self.lib = None
         self.session = None
+        self.token = None
         self.certificate = None
         self.private_key = None
         self.identity = {}
         
     async def initialize(self, pin: Optional[str] = None, interactive: bool = True) -> bool:
-        """Inicializa DNIe real"""
         try:
             console.print("🎫 Inicializando DNIe real...", style="cyan")
             
-            # 1. Buscar y cargar librería PKCS#11
-            if not await self._load_pkcs11_library():
-                return False
+            if not await self._load_pkcs11_library(): return False
+            if not await self._find_card_reader(): return False
             
-            # 2. Buscar lector y tarjeta
-            if not await self._find_card_reader():
-                return False
-            
-            # 3. Solicitar PIN si es necesario
             if not pin and interactive:
                 pin = await self._request_pin()
+            if not pin: return False
             
-            if not pin:
-                console.print("❌ PIN requerido para DNIe", style="red")
-                return False
-            
-            # 4. Abrir sesión con PIN
-            if not await self._open_session(pin):
-                return False
-            
-            # 5. Cargar certificado de autenticación
-            if not await self._load_certificate():
-                return False
-            
-            # 6. Cargar clave privada
-            if not await self._load_private_key():
-                return False
-            
-            # 7. Extraer identidad del certificado
-            if not await self._extract_identity():
-                return False
-            
-            console.print("✅ DNIe real inicializado correctamente", style="green")
-            console.print(f"👤 Usuario: {self.identity.get('name', 'Desconocido')}", style="green")
-            console.print(f"🔐 NIF: {self.identity.get('nif', 'N/A')}", style="green")
+            if not await self._open_session(pin): return False
+            if not await self._load_certificate_and_key(): return False # Nueva función fusionada
+            if not await self._extract_identity(): return False
             
             return True
-            
         except Exception as e:
-            console.print(f"❌ Error inicializando DNIe real: {e}", style="red")
+            console.print(f"❌ Error inicializando: {e}", style="red")
             return False
     
     async def _load_pkcs11_library(self) -> bool:
-        """Busca y carga librería PKCS#11"""
         console.print("🔍 Buscando librería PKCS#11...", style="yellow")
-        
         for lib_path in self.pkcs11_paths:
-            if not lib_path or not os.path.exists(lib_path):
-                continue
-            
+            if not lib_path or not os.path.exists(lib_path): continue
             try:
                 self.lib = pkcs11.lib(lib_path)
                 console.print(f"✅ Librería cargada: {lib_path}", style="green")
                 return True
-            except Exception as e:
-                console.print(f"⚠️ Error con {lib_path}: {e}", style="yellow")
-                continue
-        
-        console.print("❌ No se encontró librería PKCS#11 válida", style="red")
-        console.print("💡 Instala OpenSC o el middleware oficial del DNIe", style="blue")
+            except Exception: continue
+        console.print("❌ No se encontró librería OpenSC.", style="red")
         return False
     
     async def _find_card_reader(self) -> bool:
-        """Busca lector de tarjetas con DNIe"""
-        console.print("🔍 Buscando lector de tarjetas...", style="yellow")
-        
         try:
             slots = self.lib.get_slots(token_present=True)
-            
             if not slots:
-                console.print("❌ No se detecta ninguna tarjeta en el lector", style="red")
-                console.print("💡 Asegúrate de que:", style="blue")
-                console.print("   • El DNIe está insertado correctamente", style="blue")
-                console.print("   • El lector está conectado", style="blue")
-                console.print("   • Los drivers están instalados", style="blue")
+                console.print("❌ No hay DNIe insertado.", style="red")
                 return False
             
-            # Buscar slot con DNIe
-            for slot in slots:
-                try:
-                    token = slot.get_token()
-                    token_info = token.token_info
-                    
-                    console.print(f"🔍 Token encontrado: {token_info.label}", style="yellow")
-                    console.print(f"   Fabricante: {token_info.manufacturer_id}", style="dim")
-                    console.print(f"   Modelo: {token_info.model}", style="dim")
-                    
-                    # Verificar que es un DNIe
-                    if any(keyword in token_info.label.lower() for keyword in ['dnie', 'dni electronico', 'fnmt']):
-                        self.token = token
-                        console.print("✅ DNIe detectado correctamente", style="green")
-                        return True
-                        
-                except Exception as e:
-                    console.print(f"⚠️ Error leyendo token: {e}", style="yellow")
-                    continue
-            
-            # Si no encontramos DNIe específicamente, usar el primer token
+            # Usamos el primer slot disponible (lógica de tu script)
             self.token = slots[0].get_token()
-            console.print("⚠️ Usando primer token disponible (puede ser DNIe)", style="yellow")
+            try:
+                label = self.token.label
+            except: 
+                label = "DNIe Desconocido"
+                
+            console.print(f"✅ Token detectado: {label}", style="green")
             return True
-            
         except Exception as e:
-            console.print(f"❌ Error buscando lector: {e}", style="red")
+            console.print(f"❌ Error lector: {e}", style="red")
             return False
     
     async def _request_pin(self) -> Optional[str]:
-        """Solicita PIN del DNIe de forma segura"""
-        console.print("🔐 Se requiere el PIN del DNIe", style="cyan")
-        console.print("💡 El PIN del DNIe son 4 dígitos numéricos", style="blue")
-        
         try:
-            # Usando Rich para input seguro
-            pin = Prompt.ask("Introduce tu PIN", password=True)
-            
-            if len(pin) != 4 or not pin.isdigit():
-                console.print("⚠️ El PIN del DNIe debe ser 4 dígitos", style="yellow")
-                return None
-            
-            return pin
-            
-        except KeyboardInterrupt:
-            console.print("❌ Operación cancelada por el usuario", style="red")
-            return None
-    
+            return Prompt.ask("🔐 Introduce PIN del DNIe", password=True)
+        except: return None
+
     async def _open_session(self, pin: str) -> bool:
-        """Abre sesión con el DNIe usando PIN"""
-        console.print("🔐 Abriendo sesión con PIN...", style="yellow")
-        
         try:
             self.session = self.token.open(user_pin=pin)
             console.print("✅ Sesión abierta correctamente", style="green")
             return True
-            
-        except pkcs11.exceptions.PinIncorrect:
-            console.print("❌ PIN incorrecto", style="red")
-            console.print("⚠️ Cuidado: Demasiados intentos fallidos bloquearán el DNIe", style="yellow")
-            return False
-        except pkcs11.exceptions.PinLocked:
-            console.print("❌ DNIe bloqueado por demasiados intentos fallidos", style="red")
-            console.print("💡 Contacta con la oficina del DNI para desbloquearlo", style="blue")
-            return False
         except Exception as e:
-            console.print(f"❌ Error abriendo sesión: {e}", style="red")
+            console.print(f"❌ Error PIN/Sesión: {e}", style="red")
             return False
-    
-    async def _load_certificate(self) -> bool:
-        """Carga certificado de autenticación del DNIe"""
-        console.print("📋 Cargando certificado de autenticación...", style="yellow")
-        
+
+    async def _load_certificate_and_key(self) -> bool:
+        """
+        Lógica robusta basada en tu script de ejemplo:
+        1. Busca certificados.
+        2. Filtra por Autenticación o Firma.
+        3. Busca la clave privada que tenga EL MISMO ID que el certificado.
+        """
+        console.print("🔍 Buscando par de claves (Certificado + Privada)...", style="yellow")
         try:
-            # Buscar certificados en el DNIe
-            certificates = list(self.session.get_objects({
+            # 1. Obtener todos los certificados
+            certs = list(self.session.get_objects({
                 Attribute.CLASS: ObjectClass.CERTIFICATE,
                 Attribute.CERTIFICATE_TYPE: pkcs11.CertificateType.X_509
             }))
             
-            if not certificates:
-                console.print("❌ No se encontraron certificados", style="red")
+            if not certs:
+                console.print("❌ No se encontraron certificados.", style="red")
                 return False
+
+            target_cert = None
             
-            # Buscar certificado de autenticación
-            for cert in certificates:
+            # 2. Preferimos el certificado de AUTENTICACIÓN para el chat
+            # (Tu script buscaba firma, pero para login/chat suele ser Auth. Si no hay, firma vale).
+            for cert in certs:
                 try:
-                    label = str(cert[Attribute.LABEL]).lower()
-                    console.print(f"🔍 Certificado encontrado: {cert[Attribute.LABEL]}", style="dim")
+                    label = cert[Attribute.LABEL].lower() # Usamos [] no .get()
+                except: label = ""
+                
+                if "autenticacion" in label or "auth" in label:
+                    target_cert = cert
+                    console.print("✅ Certificado de AUTENTICACIÓN encontrado.", style="green")
+                    break
+            
+            # Si no hay de autenticación, buscamos el de firma (como en tu script)
+            if not target_cert:
+                for cert in certs:
+                    try:
+                        label = cert[Attribute.LABEL].lower()
+                    except: label = ""
                     
-                    # El certificado de autenticación suele tener estas etiquetas
-                    if any(keyword in label for keyword in ['autenticacion', 'authentication', 'auth']):
-                        self.certificate = cert
-                        console.print("✅ Certificado de autenticación cargado", style="green")
-                        return True
-                        
-                except Exception as e:
-                    console.print(f"⚠️ Error leyendo certificado: {e}", style="yellow")
-                    continue
+                    if "firma" in label:
+                        target_cert = cert
+                        console.print("⚠️ Usando certificado de FIRMA (No se halló autenticación).", style="yellow")
+                        break
             
-            # Si no encontramos específicamente de autenticación, usar el primero
-            self.certificate = certificates[0]
-            console.print("⚠️ Usando primer certificado disponible", style="yellow")
-            return True
+            # Si falla todo, cogemos el primero
+            if not target_cert:
+                target_cert = certs[0]
+                console.print("⚠️ Usando el primer certificado disponible.", style="yellow")
+
+            self.certificate = target_cert
             
-        except Exception as e:
-            console.print(f"❌ Error cargando certificado: {e}", style="red")
-            return False
-    
-    async def _load_private_key(self) -> bool:
-        """Carga clave privada correspondiente al certificado"""
-        console.print("🔑 Cargando clave privada...", style="yellow")
-        
-        try:
-            # Buscar claves privadas
-            private_keys = list(self.session.get_objects({
-                Attribute.CLASS: ObjectClass.PRIVATE_KEY
-            }))
-            
-            if not private_keys:
-                console.print("❌ No se encontraron claves privadas", style="red")
+            # 3. Buscar la clave privada ASOCIADA (Usando el ID como en tu script)
+            try:
+                cert_id = target_cert[Attribute.ID]
+                console.print(f"🔗 Buscando clave privada con ID: {cert_id.hex()[:8]}...", style="dim")
+                
+                # Buscar objeto PRIVATE_KEY con el mismo ID
+                priv_key_obj = self.session.get_key(
+                    ObjectClass.PRIVATE_KEY,
+                    id=cert_id
+                )
+                self.private_key = priv_key_obj
+                console.print("✅ Clave privada cargada correctamente.", style="green")
+                return True
+                
+            except Exception as e:
+                # Fallback: Buscar cualquier clave privada si el ID falla
+                console.print(f"⚠️ No se encontró clave por ID ({e}). Buscando la primera disponible...", style="yellow")
+                priv_keys = list(self.session.get_objects({Attribute.CLASS: ObjectClass.PRIVATE_KEY}))
+                if priv_keys:
+                    self.private_key = priv_keys[0]
+                    return True
+                
+                console.print("❌ No se encontró ninguna clave privada.", style="red")
                 return False
-            
-            # Buscar clave que coincida con el certificado
-            for key in private_keys:
-                try:
-                    label = str(key[Attribute.LABEL]).lower()
-                    console.print(f"🔍 Clave privada encontrada: {key[Attribute.LABEL]}", style="dim")
-                    
-                    if any(keyword in label for keyword in ['autenticacion', 'authentication', 'auth']):
-                        self.private_key = key
-                        console.print("✅ Clave privada de autenticación cargada", style="green")
-                        return True
-                        
-                except Exception as e:
-                    console.print(f"⚠️ Error leyendo clave privada: {e}", style="yellow")
-                    continue
-            
-            # Usar primera clave disponible
-            self.private_key = private_keys[0]
-            console.print("⚠️ Usando primera clave privada disponible", style="yellow")
-            return True
-            
+                
         except Exception as e:
-            console.print(f"❌ Error cargando clave privada: {e}", style="red")
+            console.print(f"❌ Error crítico cargando claves: {e}", style="red")
             return False
-    
+
+    async def _load_certificate(self): return True # Alias legacy
+    async def _load_private_key(self): return True # Alias legacy
+
     async def _extract_identity(self) -> bool:
-        """Extrae identidad del certificado DNIe"""
-        console.print("👤 Extrayendo identidad del certificado...", style="yellow")
-        
         try:
-            # Obtener datos del certificado
-            cert_data = bytes(self.certificate[Attribute.VALUE])
+            cert_data = self.certificate[Attribute.VALUE] # Usamos []
             cert_obj = x509.load_der_x509_certificate(cert_data)
             
-            # Extraer información del subject
             subject = cert_obj.subject
-            
-            # Valores por defecto
             name = "Usuario DNIe"
-            nif = "Desconocido"
+            for attr in subject:
+                if attr.oid == x509.NameOID.COMMON_NAME:
+                    name = attr.value
+                    break
             
-            # Extraer campos específicos del DNIe
-            for attribute in subject:
-                oid_name = attribute.oid._name
-                value = attribute.value
-                
-                if oid_name == 'commonName':
-                    name = value
-                elif oid_name == 'serialNumber':
-                    nif = value
-                elif oid_name == 'givenName':
-                    self.identity['given_name'] = value
-                elif oid_name == 'surname':
-                    self.identity['surname'] = value
-            
-            # Crear fingerprint único del certificado
-            fingerprint = hashlib.sha256(cert_data).hexdigest()[:16]
-            
-            # Almacenar identidad
-            self.identity = {
-                'name': name,
-                'nif': nif,
-                'fingerprint': fingerprint,
-                'certificate': cert_data,
-                'serial_number': str(cert_obj.serial_number),
-                'issuer': str(cert_obj.issuer),
-                'valid_from': cert_obj.not_valid_before,
-                'valid_to': cert_obj.not_valid_after,
-                'real_dnie': True
-            }
-            
-            console.print("✅ Identidad extraída correctamente", style="green")
+            fingerprint = hashlib.sha256(cert_data).hexdigest()
+            self.identity = {'name': name, 'fingerprint': fingerprint}
             return True
-            
         except Exception as e:
-            console.print(f"❌ Error extrayendo identidad: {e}", style="red")
+            console.print(f"Error identidad: {e}", style="red")
             return False
-    
+
     def get_user_name(self) -> str:
-        """Obtiene nombre del usuario"""
-        return self.identity.get('name', 'Usuario DNIe Real')
+        return self.identity.get('name', 'Desconocido')
     
     def get_fingerprint(self) -> str:
-        """Obtiene fingerprint único del certificado"""
         return self.identity.get('fingerprint', 'unknown')
-    
-    def get_nif(self) -> str:
-        """Obtiene NIF del DNIe"""
-        return self.identity.get('nif', 'Desconocido')
-    
-    def sign_data(self, data: bytes) -> bytes:
-        """Firma datos con la clave privada del DNIe"""
-        if not self.private_key or not self.session:
-            return b'no_signature'
-        
-        try:
-            console.print("🔏 Firmando datos con DNIe...", style="yellow")
-            
-            # Firmar usando PKCS#11
-            signature = self.private_key.sign(
-                data,
-                mechanism=Mechanism.SHA256_RSA_PKCS
-            )
-            
-            console.print("✅ Datos firmados con DNIe", style="green")
-            return signature
-            
-        except Exception as e:
-            console.print(f"❌ Error firmando datos: {e}", style="red")
-            return b'error_signature'
-    
-    def verify_signature(self, data: bytes, signature: bytes) -> bool:
-        """Verifica firma usando certificado público"""
-        try:
-            cert_data = self.identity.get('certificate')
-            if not cert_data:
-                return False
-            
-            cert_obj = x509.load_der_x509_certificate(cert_data)
-            public_key = cert_obj.public_key()
-            
-            public_key.verify(
-                signature,
-                data,
-                padding.PKCS1v15(),
-                hashes.SHA256()
-            )
-            
-            return True
-            
-        except Exception as e:
-            console.print(f"❌ Error verificando firma: {e}", style="red")
-            return False
-    
-    def is_mock_mode(self) -> bool:
-        """Indica si es modo simulado (siempre False para DNIe real)"""
-        return False
-    
-    def get_certificate_info(self) -> Dict[str, Any]:
-        """Obtiene información detallada del certificado"""
-        if not self.identity:
-            return {}
-        
-        return {
-            'name': self.identity.get('name'),
-            'nif': self.identity.get('nif'),
-            'fingerprint': self.identity.get('fingerprint'),
-            'serial_number': self.identity.get('serial_number'),
-            'issuer': self.identity.get('issuer'),
-            'valid_from': self.identity.get('valid_from'),
-            'valid_to': self.identity.get('valid_to'),
-            'is_real': True
-        }
-    
-    def close(self):
-        """Cierra sesión DNIe de forma segura"""
-        try:
-            if self.session:
-                self.session.close()
-                console.print("✅ Sesión DNIe cerrada", style="green")
-        except Exception as e:
-            console.print(f"⚠️ Error cerrando sesión: {e}", style="yellow")
 
-# Alias para compatibilidad
-DNIeManager = DNIeReal
+    def sign_data(self, data: bytes) -> bytes:
+        try:
+            return self.private_key.sign(data, mechanism=Mechanism.SHA256_RSA_PKCS)
+        except Exception as e:
+            console.print(f"❌ Error firmando: {e}", style="red")
+            return b''

@@ -1,9 +1,12 @@
 import os
 from typing import Optional
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 
 class DNIMessengerConfig(BaseSettings):
     """Configuración global del sistema"""
+    
+    model_config = ConfigDict(env_file=".env", case_sensitive=True)
     
     # Red y puertos
     UDP_PORT: int = 6666  # Puerto UDP según especificaciones
@@ -26,7 +29,3 @@ class DNIMessengerConfig(BaseSettings):
     
     # Trust On First Use (TOFU)
     ENABLE_TOFU: bool = True
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
