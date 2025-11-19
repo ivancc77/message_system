@@ -250,7 +250,7 @@ class CompleteNetwork:
         peer_info = self.discovered.get(target_fp)
         if not peer_info:
             for p in self.discovered.values():
-                if p['name'] == target_fp:
+                if p['name'] == target_fp or target_fp.lower() in p['name'].lower():
                     peer_info = p
                     target_fp = p['fingerprint']
                     break
