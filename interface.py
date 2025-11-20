@@ -15,7 +15,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.widgets import Frame, TextArea, Box
 from prompt_toolkit.styles import Style
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.formatted_text import HTML, merge_formatted_text, to_formatted_text
+from prompt_toolkit.formatted_text import to_formatted_text
 
 # Importamos TU código original (sin modificarlo)
 from dnie_real import DNIeReal
@@ -64,6 +64,7 @@ class TelegramTUI:
         self.pin = pin
         
         self.current_chat_fp = None
+        # messages: Diccionario donde guardamos listas de TUPLAS (estilo, texto)
         self.messages = {} 
         self.system_logs = []
         
@@ -74,11 +75,12 @@ class TelegramTUI:
         self.style = Style.from_dict({
             'sidebar': 'bg:#232323 #888888',
             'sidebar.selected': 'bg:#2d2d2d #ffffff bold',
+            'sidebar.header': 'bg:#00aaaa #ffffff bold',
             'chat.bg': 'bg:#1e1e1e #ffffff',
             'input': 'bg:#232323 #ffffff',
             'top-bar': 'bg:#181818 #64b5f6 bold',
             'msg.me': '#64b5f6',       
-            'msg.them': '#ffffff',     
+            'msg.them': '#81c784',     
             'msg.time': '#555555 italic',
             'system': '#ffb74d italic'
         })
@@ -99,7 +101,7 @@ class TelegramTUI:
         # --- LAYOUT ---
         self.layout = VSplit([
             HSplit([
-                Window(FormattedTextControl(HTML(" <b>TelegramTUI v1.0</b>")), height=1, style='class:top-bar'),
+                Window(FormattedTextControl([("class:sidebar.header", " TelegramTUI v2.0 ")]), height=1),
                 self.sidebar_window
             ]),
             HSplit([
@@ -119,50 +121,49 @@ class TelegramTUI:
         def _(event):
             self.cycle_chat()
 
-    # --- MÉTODOS DE REDIBUJADO ---
+    # --- MÉTODOS DE REDIBUJADO SEGUROS (SIN HTML) ---
     def get_sidebar_text(self):
-        lines = []
+        # Devolvemos una lista plana de (estilo, texto)
+        result = []
         peers = self.network.get_peers()
         
-        if self.current_chat_fp == "SYSTEM":
-            lines.append(HTML("<class:sidebar.selected> 📢 System Logs</class:sidebar.selected>\n"))
-        else:
-            lines.append(HTML(" 📢 System Logs\n"))
+        # Item System Logs
+        style_sys = "class:sidebar.selected" if self.current_chat_fp == "SYSTEM" else ""
+        result.append((style_sys, " 📢 System Logs\n"))
 
         for p in peers:
             fp = p['fingerprint']
             name = p.get('name', 'Unknown')[:20]
             name = name.replace("(AUTENTICACIÓN)", "").strip()
             
-            if fp == self.current_chat_fp:
-                lines.append(HTML(f"<class:sidebar.selected> 👤 {name}</class:sidebar.selected>\n"))
-            else:
-                lines.append(HTML(f" 👤 {name}\n"))
-        return merge_formatted_text(lines)
+            style_peer = "class:sidebar.selected" if fp == self.current_chat_fp else ""
+            result.append((style_peer, f" 👤 {name}\n"))
+            
+        return result
 
     def get_chat_text(self):
         if self.current_chat_fp == "SYSTEM":
-            return merge_formatted_text(self.system_logs)
+            return self.system_logs
         
         if not self.current_chat_fp:
-            return HTML("\n\n   <style color='#555555'>Selecciona un chat con TAB...</style>")
+            return [("", "\n\n   Selecciona un chat con TAB...")]
         
         msgs = self.messages.get(self.current_chat_fp, [])
         if not msgs:
-            return HTML("\n   <style color='#555555'>No hay mensajes. Escribe para iniciar...</style>")
+            return [("", "\n   No hay mensajes. Escribe para iniciar...")]
         
-        return merge_formatted_text(msgs)
+        return msgs
 
     def get_header_text(self):
-        if not self.current_chat_fp: return HTML(" DNIe Messenger")
-        if self.current_chat_fp == "SYSTEM": return HTML(" Logs del Sistema")
+        if not self.current_chat_fp: return [("", " DNIe Messenger")]
+        if self.current_chat_fp == "SYSTEM": return [("", " Logs del Sistema")]
         
         name = self.current_chat_fp[:8]
         for p in self.network.get_peers():
             if p['fingerprint'] == self.current_chat_fp:
                 name = p.get('name', name).replace("(AUTENTICACIÓN)", "").strip()
                 break
-        return HTML(f" 💬 {name}  |  <style color='#81c784'>Online</style>")
+        return [("", f" 💬 {name}  |  "), ("#81c784", "Online")]
 
     # --- LÓGICA UI ---
     def update_sidebar(self):
@@ -170,8 +171,9 @@ class TelegramTUI:
 
     def log_system(self, text):
         t = time.strftime("%H:%M")
-        line = HTML(f"<class:msg.time>[{t}]</class:msg.time> <class:system>{text}</class:system>\n")
-        self.system_logs.append(line)
+        # Usamos tuplas directas, no HTML
+        self.system_logs.append(("class:msg.time", f"[{t}] "))
+        self.system_logs.append(("class:system", f"{text}\n"))
         get_app().invalidate()
 
     def add_message(self, fp, text, is_me=True):
@@ -179,17 +181,29 @@ class TelegramTUI:
         
         t = time.strftime("%H:%M")
         if is_me:
-            header = f"<class:msg.me><b>Yo:</b></class:msg.me>"
+            # Estilo Usuario (Azul)
+            prefix_style = "class:msg.me bold"
+            prefix_text = "Yo: "
         else:
+            # Estilo Peer (Verde)
+            prefix_style = "class:msg.them bold"
             name = "Peer"
             for p in self.network.get_peers():
                 if p['fingerprint'] == fp:
                     name = p['name'].replace("(AUTENTICACIÓN)", "").strip().split()[0]
                     break
-            header = f"<class:msg.them><b>{name}:</b></class:msg.them>"
+            prefix_text = f"{name}: "
         
-        line = HTML(f"{header} {text} <class:msg.time>{t}</class:msg.time>\n")
-        self.messages[fp].append(line)
+        # Construimos el mensaje con tuplas seguras
+        # (Estilo, Texto)
+        msg_line = [
+            (prefix_style, prefix_text),
+            ("", f"{text} "),
+            ("class:msg.time", f"{t}\n")
+        ]
+        
+        # Extendemos la lista de mensajes (es una lista plana de tokens)
+        self.messages[fp].extend(msg_line)
         get_app().invalidate()
 
     def cycle_chat(self):
@@ -210,6 +224,8 @@ class TelegramTUI:
         if not text: return
         if not self.current_chat_fp or self.current_chat_fp == "SYSTEM":
             self.log_system("⚠️ Selecciona un usuario con TAB para enviar.")
+            # Limpiar aunque falle para no bloquear
+            self.input_field.buffer.reset()
             return
         asyncio.create_task(self._send_wrapper(self.current_chat_fp, text))
 
@@ -230,8 +246,7 @@ class TelegramTUI:
             print("Fallo DNIe. Saliendo.")
             return
 
-        # 2. Iniciar Red (CORRECCIÓN AQUÍ)
-        # Forzamos el puerto manualmente antes de iniciar, ya que network.start no acepta argumentos
+        # 2. Iniciar Red
         self.network.UDP_PORT = self.port 
         await self.network.start(self.username)
         
@@ -247,7 +262,7 @@ class TelegramTUI:
         await self.network.stop()
 
 if __name__ == "__main__":
-    print("=== DNIe Messenger TUI ===")
+    print("=== DNIe Messenger TUI v2.0 (Safe Mode) ===")
     u_user = input("Nombre Usuario: ") or "Usuario"
     u_port = int(input("Puerto UDP (6666): ") or 6666)
     try:
