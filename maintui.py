@@ -13,7 +13,7 @@ class DNIMessenger:
     def __init__(self):
         self.dnie = DNIeManager() 
         self.network = CompleteNetwork(self.dnie)
-        self.username = "Usuario"
+        self.username = "Victor"
 
     async def start(self):
         print("🚀 Cargando DNI Messenger TUI...")
