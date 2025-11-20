@@ -381,7 +381,17 @@ class CompleteNetwork:
         try:
             decrypted = self.noise.decrypt_message(payload, remote_fp)
             data = msgpack.unpackb(decrypted, raw=False)
-            print(f"\n📨 MENSAJE de {remote_fp[:6]}...: {data.get('text')}")
+            
+            peer_info = self.discovered.get(remote_fp)
+            if peer_info:
+                sender_name = peer_info.get('name', remote_fp[:8])
+            else:
+                sender_name = remote_fp[:8]
+            
+            # --- LIMPIEZA ESTÉTICA: Quitar lo de (AUTENTICACIÓN) ---
+            sender_name = sender_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
+            
+            print(f"\n📨 MENSAJE de {sender_name}: {data.get('text')}")
         except: 
             print("\n❌ Error desencriptando mensaje")
         
