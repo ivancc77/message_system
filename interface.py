@@ -16,45 +16,97 @@ from prompt_toolkit.widgets import Frame, TextArea, Box
 from prompt_toolkit.styles import Style
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import to_formatted_text
+from cryptography.hazmat.primitives import serialization
 
-# Importamos TU código original (sin modificarlo)
+# Importamos TU código original
 from dnie_real import DNIeReal
 from network import CompleteNetwork, MessageType
 
-# --- ADAPTADOR DE RED (Bridge) ---
+# --- ADAPTADOR DE RED BLINDADO (Sin Prints) ---
 class GuiNetwork(CompleteNetwork):
     """
-    Esta clase extiende tu CompleteNetwork para interceptar los eventos
-    y mandarlos a la interfaz.
+    Esta clase extiende tu CompleteNetwork pero REEMPLAZA los métodos
+    que hacen print() para evitar que rompan la interfaz gráfica.
     """
     def __init__(self, dnie, ui_app):
         super().__init__(dnie)
         self.ui = ui_app
 
-    # 1. Interceptamos descubrimiento de peers
+    # 1. Sobrescribimos para evitar el print("Peer descubierto...")
     def add_discovered_peer(self, info):
-        super().add_discovered_peer(info) 
-        self.ui.update_sidebar()
+        fp = info['fingerprint']
+        if fp == self.my_fingerprint: return
+        
+        # Si es nuevo, avisamos a la UI (sin print)
+        if fp not in self.discovered:
+            name = info.get('name', 'Desconocido')
+            ip = info.get('ip', '?')
+            # Log interno en la UI en vez de consola
+            self.ui.log_system(f"🔍 Peer descubierto: {name} ({ip})")
+            self.discovered[fp] = info
+            self.ui.update_sidebar()
 
-    # 2. Interceptamos mensajes de texto recibidos
+    # 2. Sobrescribimos para evitar print("MENSAJE de...")
     def _handle_text(self, payload, remote_fp):
         try:
             decrypted = self.noise.decrypt_message(payload, remote_fp)
             data = msgpack.unpackb(decrypted, raw=False)
             text = data.get('text')
+            # Enviamos a la ventana de chat
             self.ui.add_message(remote_fp, text, is_me=False)
         except Exception as e:
             self.ui.log_system(f"Error desencriptando msg de {remote_fp[:8]}")
 
-    # 3. Interceptamos Handshakes
+    # 3. Sobrescribimos handshake INIT para quitar prints
     def _handle_handshake_init(self, cid, payload, addr):
-        super()._handle_handshake_init(cid, payload, addr)
-        self.ui.log_system(f"🤝 Handshake recibido de {addr[0]}")
-        self.ui.update_sidebar()
+        try:
+            content = msgpack.unpackb(payload, raw=False)
+            remote_fp = content.get('dnie_fingerprint')
+            static_bytes = content.get('static_public')
+            ephemeral_bytes = content.get('ephemeral_public')
+            
+            # Log UI
+            clean_name = self._get_clean_name(remote_fp)
+            self.ui.log_system(f"🤝 Handshake recibido de {clean_name}...")
+            
+            if self.noise.accept_handshake(static_bytes, ephemeral_bytes, remote_fp):
+                self.ui.log_system(f"🔒 Sesión segura establecida con {clean_name}")
+            
+            if not self.connection_manager.get_cid_for_peer(remote_fp):
+                self.connection_manager.create_connection(remote_fp, {'ip': addr[0], 'port': addr[1]})
+                # Añadir a descubiertos si no estaba (para que salga en la lista)
+                if remote_fp not in self.discovered:
+                     self.discovered[remote_fp] = {
+                        'fingerprint': remote_fp,
+                        'name': "Desconocido", 
+                        'ip': addr[0], 
+                        'port': addr[1]
+                    }
+                    
+            # Responder
+            my_static = self.noise.static_public.public_bytes(
+                encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+            ack_payload = msgpack.packb({'ack': True, 'static_public': my_static})
+            pkt = self.connection_manager.create_packet(cid, 0, MessageType.HANDSHAKE_RESPONSE, ack_payload)
+            self.udp_transport.sendto(pkt, addr)
+            
+            self.ui.update_sidebar()
+            
+        except Exception as e:
+            self.ui.log_system(f"❌ Error handshake init: {e}")
 
+    # 4. Sobrescribimos handshake RESPONSE para quitar prints
     def _handle_handshake_response(self, payload, remote_fp):
-        super()._handle_handshake_response(payload, remote_fp)
-        self.ui.log_system(f"✅ Handshake completado con {self._get_clean_name(remote_fp)}")
+        try:
+            content = msgpack.unpackb(payload, raw=False)
+            if content.get('ack') and remote_fp:
+                remote_static = content.get('static_public')
+                if remote_static:
+                    if self.noise.update_session_with_peer_key(remote_static, remote_fp):
+                         clean_name = self._get_clean_name(remote_fp)
+                         self.ui.log_system(f"✅ Handshake COMPLETADO con {clean_name}")
+        except Exception as e:
+            self.ui.log_system(f"❌ Error respuesta handshake: {e}")
 
 # --- LÓGICA DE LA INTERFAZ GRÁFICA ---
 class TelegramTUI:
@@ -64,7 +116,6 @@ class TelegramTUI:
         self.pin = pin
         
         self.current_chat_fp = None
-        # messages: Diccionario donde guardamos listas de TUPLAS (estilo, texto)
         self.messages = {} 
         self.system_logs = []
         
@@ -123,7 +174,6 @@ class TelegramTUI:
 
     # --- MÉTODOS DE REDIBUJADO SEGUROS (SIN HTML) ---
     def get_sidebar_text(self):
-        # Devolvemos una lista plana de (estilo, texto)
         result = []
         peers = self.network.get_peers()
         
@@ -171,21 +221,20 @@ class TelegramTUI:
 
     def log_system(self, text):
         t = time.strftime("%H:%M")
-        # Usamos tuplas directas, no HTML
         self.system_logs.append(("class:msg.time", f"[{t}] "))
         self.system_logs.append(("class:system", f"{text}\n"))
-        get_app().invalidate()
+        # Auto-scroll si estamos viendo logs
+        if self.current_chat_fp == "SYSTEM":
+             get_app().invalidate()
 
     def add_message(self, fp, text, is_me=True):
         if fp not in self.messages: self.messages[fp] = []
         
         t = time.strftime("%H:%M")
         if is_me:
-            # Estilo Usuario (Azul)
             prefix_style = "class:msg.me bold"
             prefix_text = "Yo: "
         else:
-            # Estilo Peer (Verde)
             prefix_style = "class:msg.them bold"
             name = "Peer"
             for p in self.network.get_peers():
@@ -194,15 +243,12 @@ class TelegramTUI:
                     break
             prefix_text = f"{name}: "
         
-        # Construimos el mensaje con tuplas seguras
-        # (Estilo, Texto)
         msg_line = [
             (prefix_style, prefix_text),
             ("", f"{text} "),
             ("class:msg.time", f"{t}\n")
         ]
         
-        # Extendemos la lista de mensajes (es una lista plana de tokens)
         self.messages[fp].extend(msg_line)
         get_app().invalidate()
 
@@ -224,13 +270,13 @@ class TelegramTUI:
         if not text: return
         if not self.current_chat_fp or self.current_chat_fp == "SYSTEM":
             self.log_system("⚠️ Selecciona un usuario con TAB para enviar.")
-            # Limpiar aunque falle para no bloquear
             self.input_field.buffer.reset()
             return
         asyncio.create_task(self._send_wrapper(self.current_chat_fp, text))
 
     async def _send_wrapper(self, fp, text):
         self.input_field.buffer.reset()
+        # Enviamos usando la red original
         ok = await self.network.send_message(fp, text)
         if ok:
             self.add_message(fp, text, is_me=True)
@@ -262,7 +308,7 @@ class TelegramTUI:
         await self.network.stop()
 
 if __name__ == "__main__":
-    print("=== DNIe Messenger TUI v2.0 (Safe Mode) ===")
+    print("=== DNIe Messenger TUI v2.1 (Stable) ===")
     u_user = input("Nombre Usuario: ") or "Usuario"
     u_port = int(input("Puerto UDP (6666): ") or 6666)
     try:
