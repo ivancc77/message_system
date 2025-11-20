@@ -1,254 +1,329 @@
 import tkinter as tk
-from tkinter import ttk, simpledialog, messagebox, scrolledtext
+from tkinter import ttk, simpledialog, messagebox
 import asyncio
 import threading
 from datetime import datetime
 import queue
 
-# Importamos tu backend
+# Backend (Tus archivos originales)
 from dnie_real import DNIeReal as DNIeManager
 from network import CompleteNetwork
 
-# --- COLORES TEMA OSCURO ---
-BG_COLOR = "#121212"
-SIDEBAR_COLOR = "#1e1e1e"
-CHAT_BG = "#000000"
-TEXT_COLOR = "#e0e0e0"
-INPUT_BG = "#2c2c2c"
-ACCENT_COLOR = "#00e676"   # Verde brillante para estado
+# --- TEMA OSCURO PROFESIONAL (Estilo Discord/Telegram) ---
+COL_BG_MAIN = "#0f0f0f"      # Fondo negro casi puro
+COL_SIDEBAR = "#1b1b1b"      # Gris muy oscuro
+COL_HEADER = "#202020"       # Cabecera
+COL_INPUT_AREA = "#202020"   # Área de escribir
+COL_INPUT_BOX = "#2b2b2b"    # Caja de texto
+COL_ACCENT = "#0088cc"       # Azul Telegram
+COL_TEXT_WHITE = "#ffffff"
+COL_TEXT_GREY = "#aaaaaa"
+COL_UNREAD = "#ff9800"       # Naranja para no leídos
 
-class DNIeApp:
+# Colores de Burbujas
+BUBBLE_ME = "#2b5278"        # Azul oscuro
+BUBBLE_THEM = "#182533"      # Gris oscuro
+
+class ModernDNIeApp:
     def __init__(self, root):
         self.root = root
         self.root.title("DNIe Messenger P2P")
-        self.root.geometry("1000x700")
-        self.root.configure(bg=BG_COLOR)
+        self.root.geometry("1100x800")
+        self.root.configure(bg=COL_BG_MAIN)
 
         # Estado
         self.network = None
         self.dnie = None
         self.my_name = ""
-        self.loop = None # Loop de asyncio
+        self.loop = None 
         self.current_chat_fp = None
-        self.messages_history = {} # {fp: ["Yo: hola", "El: adios"]}
-        
-        # Cola para comunicar hilos
+        self.messages_history = {} 
         self.gui_queue = queue.Queue()
 
-        # --- ESTILOS ---
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure("Treeview", 
-                        background=SIDEBAR_COLOR, 
-                        foreground=TEXT_COLOR, 
-                        fieldbackground=SIDEBAR_COLOR,
-                        font=('Segoe UI', 10))
-        style.map('Treeview', background=[('selected', '#3d3d3d')])
+        # Fuentes
+        self.f_msg = ("Segoe UI Emoji", 11)
+        self.f_time = ("Arial", 8)
+        self.f_bold = ("Segoe UI", 11, "bold")
 
-        # --- LAYOUT ---
+        self.setup_ui()
         
-        # 1. Panel Izquierdo (Contactos)
-        self.left_frame = tk.Frame(root, bg=SIDEBAR_COLOR, width=250)
-        self.left_frame.pack(side=tk.LEFT, fill=tk.Y)
-        self.left_frame.pack_propagate(False)
-
-        tk.Label(self.left_frame, text="CONTACTOS", bg=SIDEBAR_COLOR, fg="grey", font=("Arial", 8, "bold")).pack(pady=10)
-        
-        # Lista de contactos
-        self.contacts_list = ttk.Treeview(self.left_frame, columns=("status"), show="tree", selectmode="browse")
-        self.contacts_list.pack(fill=tk.BOTH, expand=True, padx=5)
-        self.contacts_list.bind("<<TreeviewSelect>>", self.on_contact_select)
-        
-        # Barra estado inferior
-        self.status_lbl = tk.Label(self.left_frame, text="Iniciando...", bg=SIDEBAR_COLOR, fg="orange", font=("Arial", 9))
-        self.status_lbl.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
-
-        # 2. Panel Derecho (Chat)
-        self.right_frame = tk.Frame(root, bg=CHAT_BG)
-        self.right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-
-        # Cabecera del chat
-        self.chat_header = tk.Label(self.right_frame, text="Selecciona un chat", bg="#252525", fg="white", font=("Segoe UI", 14), pady=10)
-        self.chat_header.pack(fill=tk.X)
-
-        # Área de mensajes (Scrollable)
-        self.chat_area = scrolledtext.ScrolledText(self.right_frame, bg=CHAT_BG, fg=TEXT_COLOR, font=("Consolas", 11), state='disabled', borderwidth=0)
-        self.chat_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # --- CORRECCIÓN DE ESTILOS AQUÍ ---
-        # Usamos lmargin1 (primera linea) y lmargin2 (resto) en lugar de lmargin
-        self.chat_area.tag_config("me", foreground="#64b5f6", justify='right', rmargin=10)
-        self.chat_area.tag_config("them", foreground="#81c784", justify='left', lmargin1=10, lmargin2=10)
-        self.chat_area.tag_config("system", foreground="grey", justify='center')
-
-        # Área de escritura
-        self.input_frame = tk.Frame(self.right_frame, bg=SIDEBAR_COLOR, height=60)
-        self.input_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        
-        self.msg_entry = tk.Entry(self.input_frame, bg=INPUT_BG, fg="white", font=("Segoe UI", 12), insertbackground="white", borderwidth=0)
-        self.msg_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=15, pady=15, ipady=5)
-        self.msg_entry.bind("<Return>", self.send_message)
-
-        send_btn = tk.Button(self.input_frame, text="Enviar", bg="#0d47a1", fg="white", command=self.send_message, borderwidth=0, padx=20)
-        send_btn.pack(side=tk.RIGHT, padx=10)
-
-        # Iniciar revisión de cola de eventos
+        # Iniciar bucles
         self.root.after(100, self.process_queue)
-        
-        # Lanzar Login
         self.root.after(500, self.show_login)
 
-    def show_login(self):
-        pin = simpledialog.askstring("Acceso DNIe", "Introduce el PIN del DNIe:", show='*')
-        if pin:
-            # Arrancar hilo de red
-            threading.Thread(target=self.start_backend_thread, args=(pin,), daemon=True).start()
-        else:
-            self.root.quit()
+    def setup_ui(self):
+        # ==================== SIDEBAR (IZQUIERDA) ====================
+        self.sidebar = tk.Frame(self.root, bg=COL_SIDEBAR, width=320)
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        self.sidebar.pack_propagate(False)
 
-    # --- HILO DE RED (ASYNCIO) ---
-    def start_backend_thread(self, pin):
-        # Crear nuevo bucle para este hilo
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        # Perfil Propio
+        self.profile_frame = tk.Frame(self.sidebar, bg=COL_HEADER, height=70)
+        self.profile_frame.pack(fill=tk.X)
+        self.profile_lbl = tk.Label(self.profile_frame, text="Conectando...", bg=COL_HEADER, fg=COL_TEXT_WHITE, font=("Segoe UI", 13, "bold"))
+        self.profile_lbl.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Lista de Contactos (Scrollable)
+        self.contacts_canvas = tk.Canvas(self.sidebar, bg=COL_SIDEBAR, highlightthickness=0)
+        self.contacts_frame = tk.Frame(self.contacts_canvas, bg=COL_SIDEBAR)
+        self.contacts_scroll = ttk.Scrollbar(self.sidebar, orient="vertical", command=self.contacts_canvas.yview)
         
-        self.gui_queue.put(("status", ("⏳ Conectando DNIe...", "orange")))
+        self.contacts_canvas.configure(yscrollcommand=self.contacts_scroll.set)
+        self.contacts_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.contacts_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        self.dnie = DNIeManager()
+        self.contacts_window = self.contacts_canvas.create_window((0,0), window=self.contacts_frame, anchor="nw")
+        self.contacts_frame.bind("<Configure>", self.on_contacts_configure)
+        self.contacts_canvas.bind("<Configure>", self.on_contacts_canvas_resize)
+
+        # ==================== CHAT AREA (DERECHA) ====================
+        self.chat_panel = tk.Frame(self.root, bg=COL_BG_MAIN)
+        self.chat_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # Cabecera Chat
+        self.header = tk.Frame(self.chat_panel, bg=COL_HEADER, height=60)
+        self.header.pack(fill=tk.X)
+        self.header_name = tk.Label(self.header, text="Bienvenido", bg=COL_HEADER, fg=COL_TEXT_WHITE, font=("Segoe UI", 16, "bold"))
+        self.header_name.pack(side=tk.LEFT, padx=20, pady=10)
+
+        # --- ZONA DE MENSAJES ---
+        self.msg_canvas = tk.Canvas(self.chat_panel, bg=COL_BG_MAIN, highlightthickness=0)
+        self.msg_frame = tk.Frame(self.msg_canvas, bg=COL_BG_MAIN)
+        self.msg_scroll = ttk.Scrollbar(self.chat_panel, orient="vertical", command=self.msg_canvas.yview)
         
-        # Ejecutar inicialización
-        try:
-            ok = self.loop.run_until_complete(self.dnie.initialize(pin, interactive=False))
-            if not ok:
-                self.gui_queue.put(("error", "PIN incorrecto o DNIe no detectado"))
-                return
-            
-            # Limpiar nombre
-            raw_name = self.dnie.get_user_name()
-            self.my_name = raw_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
-            
-            self.gui_queue.put(("status", (f"✅ {self.my_name}", ACCENT_COLOR)))
-            
-            # Iniciar red
-            self.network = CompleteNetwork(self.dnie)
-            
-            # Monkey Patching para capturar eventos
-            orig_peer = self.network.add_discovered_peer
+        self.msg_canvas.configure(yscrollcommand=self.msg_scroll.set)
+        self.msg_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.msg_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        self.msg_window = self.msg_canvas.create_window((0,0), window=self.msg_frame, anchor="nw")
+        
+        # Bindings scroll
+        self.msg_frame.bind("<Configure>", self.on_msg_frame_configure)
+        self.msg_canvas.bind("<Configure>", self.on_msg_canvas_resize)
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
 
-            def gui_handle_text(payload, fp):
-                try:
-                    decrypted = self.network.noise.decrypt_message(payload, fp)
-                    import msgpack
-                    data = msgpack.unpackb(decrypted, raw=False)
-                    text = data.get('text')
-                    name = self.network._get_clean_name(fp)
-                    # Enviar a la GUI
-                    self.gui_queue.put(("msg", (fp, name, text)))
-                except: pass
+        # ==================== INPUT AREA (ABAJO) ====================
+        self.input_area = tk.Frame(self.chat_panel, bg=COL_INPUT_AREA, height=80)
+        self.input_area.pack(fill=tk.X, side=tk.BOTTOM)
 
-            def gui_add_peer(info):
-                orig_peer(info)
-                self.gui_queue.put(("peer", info))
+        self.input_box = tk.Frame(self.input_area, bg=COL_INPUT_BOX, padx=10, pady=10)
+        self.input_box.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-            self.network._handle_text = gui_handle_text
-            self.network.add_discovered_peer = gui_add_peer
-            
-            self.gui_queue.put(("log", "Iniciando red P2P..."))
-            self.loop.run_until_complete(self.network.start(self.my_name))
-            
-            # Mantener vivo el loop
-            self.loop.run_forever()
-            
-        except Exception as e:
-            self.gui_queue.put(("error", str(e)))
+        self.entry = tk.Entry(self.input_box, bg=COL_INPUT_BOX, fg="white", font=("Segoe UI", 12), 
+                              insertbackground="white", relief=tk.FLAT)
+        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.entry.bind("<Return>", self.send_message)
 
-    # --- HILO GUI (MAIN) ---
-    def process_queue(self):
-        """Revisa si el hilo de red ha mandado algo"""
-        try:
-            while True:
-                type_, data = self.gui_queue.get_nowait()
-                
-                if type_ == "status":
-                    self.status_lbl.config(text=data[0], fg=data[1])
-                elif type_ == "error":
-                    messagebox.showerror("Error", data)
-                    self.root.quit()
-                elif type_ == "peer":
-                    self.update_contact_list()
-                elif type_ == "msg":
-                    fp, name, text = data
-                    self.add_message_to_history(fp, text, is_me=False, name=name)
-                elif type_ == "log":
-                    print(data) # Solo consola debug
-        except queue.Empty:
-            pass
-        finally:
-            self.root.after(100, self.process_queue)
+        self.send_btn = tk.Button(self.input_box, text="➤", bg=COL_ACCENT, fg="white", 
+                                  font=("Arial", 12, "bold"), command=self.send_message, 
+                                  relief=tk.FLAT, cursor="hand2")
+        self.send_btn.pack(side=tk.RIGHT, padx=5)
 
-    def update_contact_list(self):
-        # Limpiar y recargar
-        for item in self.contacts_list.get_children():
-            self.contacts_list.delete(item)
+    # --- SCROLLING MAGIC ---
+    def on_contacts_configure(self, event):
+        self.contacts_canvas.configure(scrollregion=self.contacts_canvas.bbox("all"))
+    
+    def on_contacts_canvas_resize(self, event):
+        self.contacts_canvas.itemconfigure(self.contacts_window, width=event.width)
+
+    def on_msg_frame_configure(self, event):
+        self.msg_canvas.configure(scrollregion=self.msg_canvas.bbox("all"))
+    
+    def on_msg_canvas_resize(self, event):
+        self.msg_canvas.itemconfigure(self.msg_window, width=event.width)
+        
+    def _on_mousewheel(self, event):
+        self.msg_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    def scroll_to_bottom(self):
+        self.msg_canvas.update_idletasks()
+        self.msg_canvas.yview_moveto(1.0)
+
+    # --- DIBUJAR MENSAJES ---
+    def draw_bubble(self, text, is_me, name, time_str):
+        row = tk.Frame(self.msg_frame, bg=COL_BG_MAIN)
+        row.pack(fill=tk.X, pady=5, padx=20)
+
+        bg_color = BUBBLE_ME if is_me else BUBBLE_THEM
+        side = tk.RIGHT if is_me else tk.LEFT
+        
+        bubble = tk.Frame(row, bg=bg_color)
+        bubble.pack(side=side)
+
+        content = tk.Frame(bubble, bg=bg_color, padx=15, pady=10)
+        content.pack()
+
+        if not is_me:
+            lbl_name = tk.Label(content, text=name, bg=bg_color, fg=COL_ACCENT, font=self.f_bold, anchor="w")
+            lbl_name.pack(fill=tk.X, pady=(0, 2))
+
+        lbl_text = tk.Label(content, text=text, bg=bg_color, fg=COL_TEXT_WHITE, 
+                            font=self.f_msg, justify=tk.LEFT, wraplength=400)
+        lbl_text.pack(anchor="w")
+
+        lbl_time = tk.Label(content, text=time_str, bg=bg_color, fg=COL_TEXT_GREY, font=self.f_time)
+        lbl_time.pack(anchor="e", pady=(2,0))
+
+        self.scroll_to_bottom()
+
+    # --- LOGICA CONTACTOS MEJORADA (Con notificaciones) ---
+    def refresh_contact_list(self):
+        for widget in self.contacts_frame.winfo_children():
+            widget.destroy()
             
         for peer in self.network.get_peers():
             fp = peer['fingerprint']
             name = self.network._get_clean_name(fp)
-            # Icono unicode para estado
-            self.contacts_list.insert("", "end", iid=fp, text=f"👤 {name}")
-
-    def on_contact_select(self, event):
-        selection = self.contacts_list.selection()
-        if selection:
-            fp = selection[0]
-            self.current_chat_fp = fp
             
-            name = self.network._get_clean_name(fp)
-            self.chat_header.config(text=name)
-            self.refresh_chat_window()
+            # Verificar mensajes no leídos
+            has_unread = False
+            if fp in self.messages_history and fp != self.current_chat_fp:
+                has_unread = True
+                
+            self.create_contact_item(name, fp, has_unread)
 
-    def refresh_chat_window(self):
-        self.chat_area.config(state='normal')
-        self.chat_area.delete(1.0, tk.END)
+    def create_contact_item(self, name, fp, unread=False):
+        # Color de fondo según estado
+        bg_color = "#2c2c2c" if unread else COL_SIDEBAR
         
-        history = self.messages_history.get(self.current_chat_fp, [])
-        for is_me, text, time_str in history:
-            tag = "me" if is_me else "them"
-            # Formato bonito
-            sender = "Tú" if is_me else self.chat_header.cget("text")
-            self.chat_area.insert(tk.END, f"{sender} [{time_str}]\n", "system")
-            self.chat_area.insert(tk.END, f"{text}\n\n", tag)
+        card = tk.Frame(self.contacts_frame, bg=bg_color, height=70, cursor="hand2")
+        card.pack(fill=tk.X, pady=1)
+        
+        # Efectos visuales
+        def on_enter(e): 
+            if fp != self.current_chat_fp: card.config(bg="#2b2b2b")
+        def on_leave(e): 
+            if fp == self.current_chat_fp: card.config(bg="#2b5278") # Seleccionado
+            elif unread: card.config(bg="#2c2c2c") # No leído
+            else: card.config(bg=COL_SIDEBAR) # Normal
+        
+        card.bind("<Enter>", on_enter)
+        card.bind("<Leave>", on_leave)
+
+        # Avatar con color de alerta
+        initial = name[0].upper() if name else "?"
+        avatar_bg = COL_UNREAD if unread else "#555"
+        avatar = tk.Label(card, text=initial, bg=avatar_bg, fg="white", width=3, height=1, font=("Arial", 16, "bold"))
+        avatar.pack(side=tk.LEFT, padx=15, pady=15)
+        
+        # Nombre destacado
+        fg_color = "white" if unread else "#b0b0b0"
+        font_style = self.f_bold if unread else ("Segoe UI", 11)
+        
+        lbl = tk.Label(card, text=name, bg=bg_color, fg=fg_color, font=font_style)
+        lbl.pack(side=tk.LEFT, pady=20)
+        
+        # Punto de notificación
+        if unread:
+             dot = tk.Label(card, text="●", bg=bg_color, fg=COL_UNREAD, font=("Arial", 12))
+             dot.pack(side=tk.RIGHT, padx=10)
+             dot.bind("<Button-1>", lambda e, f=fp, n=name: self.select_chat(f, n))
+
+        # Click events
+        for widget in [card, avatar, lbl]:
+            widget.bind("<Button-1>", lambda e, f=fp, n=name: self.select_chat(f, n))
+
+    def select_chat(self, fp, name):
+        self.current_chat_fp = fp
+        self.header_name.config(text=name)
+        
+        # Al entrar, refrescamos la lista para quitar la marca de "no leído"
+        self.refresh_contact_list()
+        
+        # Limpiar chat visual
+        for widget in self.msg_frame.winfo_children():
+            widget.destroy()
             
-        self.chat_area.config(state='disabled')
-        self.chat_area.see(tk.END)
+        # Cargar historial
+        history = self.messages_history.get(fp, [])
+        for is_me, text, t in history:
+            # Determinar nombre
+            sender = "Yo" if is_me else name
+            self.draw_bubble(text, is_me, sender, t)
 
-    def add_message_to_history(self, fp, text, is_me, name=""):
-        if fp not in self.messages_history:
-            self.messages_history[fp] = []
+    # --- CORE LOGIC ---
+    def show_login(self):
+        pin = simpledialog.askstring("DNIe", "Introduce tu PIN del DNIe:", show='*')
+        if pin: threading.Thread(target=self.backend_thread, args=(pin,), daemon=True).start()
+        else: self.root.quit()
+
+    def backend_thread(self, pin):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.dnie = DNIeManager()
         
+        try:
+            if not self.loop.run_until_complete(self.dnie.initialize(pin, interactive=False)):
+                self.gui_queue.put(("error", "Fallo DNIe"))
+                return
+            
+            self.my_name = self.dnie.get_user_name().replace("(AUTENTICACIÓN)","").strip()
+            self.gui_queue.put(("login_ok", self.my_name))
+            
+            self.network = CompleteNetwork(self.dnie)
+            
+            # Monkey Patching
+            orig_peer = self.network.add_discovered_peer
+            def gui_msg(payload, fp):
+                try:
+                    dec = self.network.noise.decrypt_message(payload, fp)
+                    import msgpack
+                    data = msgpack.unpackb(dec, raw=False)
+                    name = self.network._get_clean_name(fp)
+                    self.gui_queue.put(("msg", (fp, name, data.get('text'))))
+                except: pass
+            
+            def gui_peer(info):
+                orig_peer(info)
+                self.gui_queue.put(("peer", None))
+
+            self.network._handle_text = gui_msg
+            self.network.add_discovered_peer = gui_peer
+            
+            self.loop.run_until_complete(self.network.start(self.my_name))
+            self.loop.run_forever()
+        except Exception as e: print(e)
+
+    def process_queue(self):
+        try:
+            while True:
+                type_, data = self.gui_queue.get_nowait()
+                if type_ == "login_ok": 
+                    self.profile_lbl.config(text=data)
+                elif type_ == "peer": 
+                    # Refrescamos lista (que ya gestiona los estados de no leído)
+                    self.refresh_contact_list()
+                elif type_ == "msg":
+                    fp, name, txt = data
+                    self.add_msg(fp, txt, False, name)
+                    # IMPORTANTE: Refrescar lista para mostrar alerta si es chat no activo
+                    if fp != self.current_chat_fp:
+                        self.refresh_contact_list()
+                elif type_ == "error": 
+                    messagebox.showerror("Error", data)
+        except queue.Empty: pass
+        self.root.after(100, self.process_queue)
+
+    def add_msg(self, fp, text, is_me, name=""):
         t = datetime.now().strftime("%H:%M")
+        if fp not in self.messages_history: self.messages_history[fp] = []
         self.messages_history[fp].append((is_me, text, t))
         
+        # Solo dibujar si es el chat activo
         if self.current_chat_fp == fp:
-            self.refresh_chat_window()
+            self.draw_bubble(text, is_me, name, t)
 
     def send_message(self, event=None):
-        text = self.msg_entry.get().strip()
+        text = self.entry.get().strip()
         if not text or not self.current_chat_fp: return
+        self.entry.delete(0, tk.END)
         
-        target = self.current_chat_fp
-        self.msg_entry.delete(0, tk.END)
-        
-        # Enviar en el hilo de asyncio de forma segura
         asyncio.run_coroutine_threadsafe(
-            self.network.send_message(target, text), 
-            self.loop
+            self.network.send_message(self.current_chat_fp, text), self.loop
         )
-        
-        # Actualizar mi vista inmediatamente
-        self.add_message_to_history(target, text, is_me=True)
+        self.add_msg(self.current_chat_fp, text, True, "Yo")
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = DNIeApp(root)
+    app = ModernDNIeApp(root)
     root.mainloop()
