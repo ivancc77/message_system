@@ -31,7 +31,7 @@ def get_message_bubble(text, is_me, sender_name):
                     ],
                     spacing=2
                 ),
-                bgcolor="#263238" if is_me else "#1a237e", # BlueGrey900 / Indigo900
+                bgcolor="#263238" if is_me else "#1a237e",
                 padding=12,
                 border_radius=ft.border_radius.only(
                     top_left=12, top_right=12,
@@ -53,16 +53,15 @@ def get_contact_card(peer_info, page):
         # Resetear colores
         for control in state.contacts_list_view.controls:
             control.bgcolor = "transparent"
-        e.control.bgcolor = "#37474f" # BlueGrey800
+        e.control.bgcolor = "#37474f"
         e.control.update()
         state.contacts_list_view.update()
-        
         update_chat_view(page)
         
     return ft.Container(
         content=ft.Row(
             [
-                ft.Icon(ft.icons.PERSON, color="blue"),
+                ft.Icon(name="person", color="blue"), # FIX: String directo
                 ft.Column(
                     [
                         ft.Text(name, weight=ft.FontWeight.BOLD, size=14, overflow=ft.TextOverflow.ELLIPSIS),
@@ -80,7 +79,6 @@ def get_contact_card(peer_info, page):
 
 def update_chat_view(page):
     state.chat_view.controls.clear()
-    
     if state.current_chat_fp:
         history = state.messages_history.get(state.current_chat_fp, [])
         for is_me, text, sender_name in history:
@@ -129,7 +127,6 @@ async def init_system(page, pin, status_lbl):
         
         state.my_name = state.dnie.get_user_name().replace("(AUTENTICACIÓN)","").strip()
         
-        # Iniciar Red
         state.network = CompleteNetwork(state.dnie)
         
         # Monkey Patching
@@ -167,7 +164,7 @@ def main(page: ft.Page):
     page.padding = 0
     page.window_width = 1000
     page.window_height = 700
-    page.bgcolor = "black" # Usamos string directo
+    page.bgcolor = "black"
 
     # --- UI ELEMENTOS ---
     status_bar = ft.Text("Esperando inicio de sesión...", size=12, color="grey")
@@ -186,7 +183,8 @@ def main(page: ft.Page):
             state.messages_history[target].append((True, txt, "Yo"))
             update_chat_view(page)
 
-    btn_send = ft.IconButton(icon=ft.icons.SEND_ROUNDED, icon_color="blue", on_click=lambda e: asyncio.create_task(send_click(e)))
+    # FIX: Iconos como strings
+    btn_send = ft.IconButton(icon="send_rounded", icon_color="blue", on_click=lambda e: asyncio.create_task(send_click(e)))
 
     # --- DIALOGO DE LOGIN (PIN) ---
     pin_input = ft.TextField(label="PIN del DNIe", password=True, text_align=ft.TextAlign.CENTER)
@@ -214,7 +212,7 @@ def main(page: ft.Page):
         modal=True,
         title=ft.Text("Autenticación DNIe"),
         content=ft.Column([
-            ft.Icon(ft.icons.SMART_BUTTON, size=50, color="blue"),
+            ft.Icon(name="smart_button", size=50, color="blue"), # FIX: Icono string
             ft.Text("Introduce tu PIN para firmar tu identidad en la red."),
             pin_input,
             login_status
