@@ -1,8 +1,7 @@
 """
-Red P2P Completa - VERSION 5.0 (FINAL DEFINITIVA)
-- Fix: Intercambio real de claves en la respuesta del Handshake
-- Fix: Nonce aleatorio para evitar errores de desencriptado
-- Fix: Manejador de HANDSHAKE_RESPONSE añadido
+Red P2P Completa - VERSION 5.1 (FINAL ESTÉTICA)
+- Nombres limpios en "Sesión establecida" y "Handshake completado"
+- Elimina (AUTENTICACIÓN)/(FIRMA) de todos los avisos
 """
 import asyncio
 import socket
@@ -39,13 +38,11 @@ class NoiseIKProtocol:
         ephemeral_private = X25519PrivateKey.generate()
         ephemeral_public = ephemeral_private.public_key()
         
-        # Si no tenemos la clave remota, usamos una temporal (se actualizará al recibir respuesta)
         if not remote_static_key_bytes:
              remote_static = X25519PrivateKey.generate().public_key() 
         else:
             remote_static = X25519PublicKey.from_public_bytes(remote_static_key_bytes)
         
-        # Guardamos los secretos efímeros para recalcular luego si hace falta
         self.temp_ephemeral = ephemeral_private
         
         es = ephemeral_private.exchange(remote_static)
@@ -79,7 +76,6 @@ class NoiseIKProtocol:
             es = self.static_private.exchange(sender_ephemeral)
             ss = self.static_private.exchange(sender_static)
             
-            # Invertir claves para el receptor
             h = hashlib.blake2b(digest_size=64)
             h.update(b"DNI-IM-NoiseIK-v1") 
             h.update(es)
@@ -93,24 +89,19 @@ class NoiseIKProtocol:
                 'established': True
             }
             self.sessions[sender_fp] = session
-            print(f"🔐 Sesión segura establecida con {sender_fp[:8]}")
             return True
         except Exception as e:
             print(f"❌ Error crypto handshake: {e}")
             return False
 
     def update_session_with_peer_key(self, remote_static_bytes, remote_fingerprint):
-        """Recalcula la sesión cuando recibimos la clave real del peer"""
         try:
             remote_static = X25519PublicKey.from_public_bytes(remote_static_bytes)
-            
-            # Recalcular usando la clave real
             es = self.temp_ephemeral.exchange(remote_static)
             ss = self.static_private.exchange(remote_static)
             
             session = self._derive_session(es, ss, remote_fingerprint)
             self.sessions[remote_fingerprint] = session
-            print(f"🔄 Sesión actualizada con clave real de {remote_fingerprint[:8]}")
             return True
         except Exception as e:
             print(f"❌ Error actualizando sesión: {e}")
@@ -133,7 +124,7 @@ class NoiseIKProtocol:
         session = self.sessions.get(remote_fingerprint)
         if not session: return plaintext
         try:
-            nonce = os.urandom(12) # FIX: Nonce aleatorio
+            nonce = os.urandom(12)
             ciphertext = session['send_cipher'].encrypt(nonce, plaintext, None)
             return nonce + ciphertext
         except: return plaintext
@@ -245,7 +236,7 @@ class CompleteNetwork:
             return key
 
     async def start(self, username: str):
-        print(f"🚀 Iniciando Red P2P (Version 5.0)...")
+        print(f"🚀 Iniciando Red P2P (Version 5.1)...")
         self.my_name = username
         self.my_fingerprint = self.dnie.get_fingerprint()
         static_private = self._load_identity()
@@ -290,6 +281,13 @@ class CompleteNetwork:
     def get_network_stats(self):
         return {'peers': len(self.discovered), 'my_fp': self.my_fingerprint}
 
+    # --- FUNCIÓN PARA LIMPIAR NOMBRES ---
+    def _get_clean_name(self, fp):
+        peer = self.discovered.get(fp)
+        raw_name = peer.get('name', fp[:8]) if peer else fp[:8]
+        # Limpiar (AUTENTICACIÓN), (FIRMA) y espacios
+        return raw_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
+
     async def send_message(self, target_name_or_fp, text):
         peer_info = self.discovered.get(target_name_or_fp)
         target_fp = target_name_or_fp
@@ -303,7 +301,7 @@ class CompleteNetwork:
                      break
         
         if not peer_info:
-            print("❌ Peer no encontrado.")
+            print("❌ Peer no encontrado. Usa /peers para ver nombres.")
             return False
             
         if target_fp not in self.contact_book:
@@ -313,7 +311,7 @@ class CompleteNetwork:
         if not cid:
             cid = self.connection_manager.create_connection(target_fp, peer_info)
             await self._send_handshake(cid, peer_info)
-            await asyncio.sleep(0.5) # Esperar respuesta
+            await asyncio.sleep(0.5)
             
         sid = self.connection_manager.create_stream(cid, 'text')
         msg_bytes = msgpack.packb({'text': text, 'ts': time.time()})
@@ -349,16 +347,17 @@ class CompleteNetwork:
             static_bytes = content.get('static_public')
             ephemeral_bytes = content.get('ephemeral_public')
             
-            print(f"🤝 Handshake recibido de {remote_fp[:8]}...")
-            self.noise.accept_handshake(static_bytes, ephemeral_bytes, remote_fp)
+            # Mostrar nombre limpio
+            print(f"🤝 Handshake recibido de {self._get_clean_name(remote_fp)}...")
+            
+            if self.noise.accept_handshake(static_bytes, ephemeral_bytes, remote_fp):
+                print(f"🔒 Sesión segura establecida con {self._get_clean_name(remote_fp)}")
             
             if not self.connection_manager.get_cid_for_peer(remote_fp):
                 self.connection_manager.create_connection(remote_fp, {'ip': addr[0], 'port': addr[1]})
             
-            # FIX: Enviar MI clave pública en la respuesta
             my_static = self.noise.static_public.public_bytes(
                 encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
-            
             ack_payload = msgpack.packb({'ack': True, 'static_public': my_static})
             pkt = self.connection_manager.create_packet(cid, 0, MessageType.HANDSHAKE_RESPONSE, ack_payload)
             self.udp_transport.sendto(pkt, addr)
@@ -369,11 +368,10 @@ class CompleteNetwork:
         try:
             content = msgpack.unpackb(payload, raw=False)
             if content.get('ack') and remote_fp:
-                # FIX: Actualizar sesión con la clave real del peer
                 remote_static = content.get('static_public')
                 if remote_static:
-                    self.noise.update_session_with_peer_key(remote_static, remote_fp)
-                    print(f"✅ Handshake COMPLETADO con {remote_fp[:8]}")
+                    if self.noise.update_session_with_peer_key(remote_static, remote_fp):
+                         print(f"✅ Handshake COMPLETADO con {self._get_clean_name(remote_fp)}")
         except Exception as e:
             print(f"❌ Error respuesta handshake: {e}")
 
@@ -381,17 +379,8 @@ class CompleteNetwork:
         try:
             decrypted = self.noise.decrypt_message(payload, remote_fp)
             data = msgpack.unpackb(decrypted, raw=False)
-            
-            peer_info = self.discovered.get(remote_fp)
-            if peer_info:
-                sender_name = peer_info.get('name', remote_fp[:8])
-            else:
-                sender_name = remote_fp[:8]
-            
-            # --- LIMPIEZA ESTÉTICA: Quitar lo de (AUTENTICACIÓN) ---
-            sender_name = sender_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
-            
-            print(f"\n📨 MENSAJE de {sender_name}: {data.get('text')}")
+            # Nombre limpio
+            print(f"\n📨 MENSAJE de {self._get_clean_name(remote_fp)}: {data.get('text')}")
         except: 
             print("\n❌ Error desencriptando mensaje")
         
