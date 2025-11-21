@@ -1,0 +1,11 @@
+# Ignorar claves privadas (SEGURIDAD)
+*.pem
+*.key
+
+# Ignorar archivos temporales de Python (LIMPIEZA)
+__pycache__/
+*.py[cod]
+
+# Ignorar entornos virtuales (si los usas)
+.venv/
+venv/
