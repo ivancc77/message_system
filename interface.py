@@ -18,7 +18,6 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import to_formatted_text
 from cryptography.hazmat.primitives import serialization
 
-# Importamos TU código original
 from dnie_real import DNIeReal
 from network import CompleteNetwork, MessageType
 
@@ -31,8 +30,7 @@ class GuiNetwork(CompleteNetwork):
     def __init__(self, dnie, ui_app):
         super().__init__(dnie)
         self.ui = ui_app
-
-    # REEMPLAZAMOS (Sin llamar a super) para evitar el print original
+ 
     def add_discovered_peer(self, info):
         fp = info['fingerprint']
         if fp == self.my_fingerprint: return
