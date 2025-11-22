@@ -1,12 +1,12 @@
-# DNI Messenger - Dependencias (ACTUALIZADO)
+# Criptografía y DNIe
 cryptography>=41.0.0
-PyNaCl>=1.5.0
-zeroconf>=0.131.0
-rich>=13.7.0
-msgpack>=1.0.7
-textual>=0.45.0
-
-# DNIe REAL - Nuevas dependencias
 python-pkcs11>=0.7.0
 asn1crypto>=1.5.0
+PyNaCl>=1.5.0
 
+# Red y Serialización
+zeroconf>=0.131.0
+msgpack>=1.0.7
+
+# Utilidades (Logs y consola)
+rich>=13.7.0
