@@ -1,7 +1,5 @@
 """
 Red P2P Completa - VERSION 5.1 (FINAL ESTÉTICA)
-- Nombres limpios en "Sesión establecida" y "Handshake completado"
-- Elimina (AUTENTICACIÓN)/(FIRMA) de todos los avisos
 """
 import asyncio
 import socket
