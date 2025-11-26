@@ -358,12 +358,12 @@ class CompleteNetwork:
                      break
         
         # [CORRECCIÓN] Lógica Offline / Queueing
-        if not peer_info:
-            print(f"💤 Usuario offline. Mensaje encolado para {target_fp[:8]}")
-            if target_fp not in self.message_queue:
-                self.message_queue[target_fp] = []
-            self.message_queue[target_fp].append(text)
-            return True # Pretendemos que se envió (se entregará luego)
+        #if not peer_info:
+         #   print(f"💤 Usuario offline. Mensaje encolado para {target_fp[:8]}")
+          #  if target_fp not in self.message_queue:
+           #     self.message_queue[target_fp] = []
+            #self.message_queue[target_fp].append(text)
+            #return True # Pretendemos que se envió (se entregará luego)
 
         # Proceso normal de envío
         cid = self.connection_manager.get_cid_for_peer(target_fp)

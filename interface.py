@@ -48,13 +48,32 @@ class GuiNetwork(CompleteNetwork):
     # REEMPLAZAMOS (Sin llamar a super)
     def _handle_text(self, payload, remote_fp):
         try:
+            # 1. Intentamos desencriptar
             decrypted = self.noise.decrypt_message(payload, remote_fp)
-            data = msgpack.unpackb(decrypted, raw=False)
+            
+            # 2. Intentamos leer el contenido
+            try:
+                data = msgpack.unpackb(decrypted, raw=False)
+            except:
+                # Si falla aquí, es que decrypt devolvió basura o el mensaje no es msgpack
+                self.ui.log_system(f"⚠️ Error: Mensaje mal formado de {remote_fp[:8]}")
+                return
+
             text = data.get('text')
-            # Enviamos a la ventana de chat
+            
+            # 3. ¡LOG DE ÉXITO! (Esto nos dirá si llega)
+            clean_name = self._get_clean_name(remote_fp)
+            self.ui.log_system(f"📨 RECIBIDO de {clean_name}: {text}")
+
+            # 4. Lo mandamos a la ventana de chat
             self.ui.add_message(remote_fp, text, is_me=False)
+            
+            # 5. Forzamos actualización visual inmediata
+            from prompt_toolkit.application.current import get_app
+            get_app().invalidate()
+
         except Exception as e:
-            self.ui.log_system(f"Error desencriptando msg de {remote_fp[:8]}")
+            self.ui.log_system(f"❌ Error CRÍTICO procesando msg: {e}")
 
     # REEMPLAZAMOS la lógica completa del Handshake Init
     def _handle_handshake_init(self, cid, payload, addr):
