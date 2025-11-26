@@ -156,3 +156,11 @@ class DNIeReal:
         except Exception as e:
             console.print(f"❌ Error firmando: {e}", style="red")
             return b''
+    
+    def get_certificate_der(self) -> bytes:
+        if self.certificate:
+            try:
+                return self.certificate[Attribute.VALUE]
+            except:
+                return b''
+        return b''
