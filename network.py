@@ -56,7 +56,7 @@ class NoiseIKProtocol:
         es = ephemeral_private.exchange(remote_static)
         ss = self.static_private.exchange(remote_static)
         
-        session = self._derive_session(es, ss, remote_fingerprint)
+        session = self._derive_session(es, ss, remote_fingerprint, is_initiator=True)
         self.sessions[remote_fingerprint] = session
         
         ephemeral_bytes = ephemeral_public.public_bytes(
@@ -119,7 +119,7 @@ class NoiseIKProtocol:
             es = self.static_private.exchange(sender_ephemeral)
             ss = self.static_private.exchange(sender_static)
             
-            session = self._derive_session(es, ss, sender_fp)
+            session = self._derive_session(es, ss, sender_fp, is_initiator=False)
             self.sessions[sender_fp] = session
             return True
 
@@ -132,16 +132,15 @@ class NoiseIKProtocol:
             remote_static = X25519PublicKey.from_public_bytes(remote_static_bytes)
             es = self.temp_ephemeral.exchange(remote_static)
             ss = self.static_private.exchange(remote_static)
-            session = self._derive_session(es, ss, remote_fingerprint)
+            session = self._derive_session(es, ss, remote_fingerprint, is_initiator=True)
             self.sessions[remote_fingerprint] = session
             return True
         except Exception as e:
             print(f"❌ Error actualizando sesión: {e}")
             return False
 
-    def _derive_session(self, es, ss, fp):
-        # [CORRECCIÓN] Uso de HKDF + BLAKE2s (Requisito estricto)
-        # BLAKE2s tiene digest de 32 bytes. Queremos 64 bytes de salida (32 key send + 32 key recv)
+    def _derive_session(self, es, ss, fp, is_initiator: bool):
+        # Derivación HKDF (Igual que tenías)
         hkdf = HKDF(
             algorithm=hashes.BLAKE2s(digest_size=32),
             length=64,
@@ -149,12 +148,22 @@ class NoiseIKProtocol:
             info=b'DNI-IM-v2',
         )
         key_material = hkdf.derive(es + ss)
-
-        print(f"🔑 DEBUG KEY MATERIAL: {key_material.hex()[:10]}...")
         
+        # --- CORRECCIÓN DE SIMETRÍA ---
+        k1 = key_material[:32]
+        k2 = key_material[32:64]
+        
+        if is_initiator:
+            send_key = k1
+            recv_key = k2
+        else:
+            # Si soy el que responde, cruzo las claves
+            send_key = k2
+            recv_key = k1
+            
         return {
-            'send_cipher': ChaCha20Poly1305(key_material[:32]),
-            'recv_cipher': ChaCha20Poly1305(key_material[32:64]),
+            'send_cipher': ChaCha20Poly1305(send_key),
+            'recv_cipher': ChaCha20Poly1305(recv_key),
             'remote_fingerprint': fp,
             'established': True
         }
