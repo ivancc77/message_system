@@ -410,41 +410,70 @@ class CompleteNetwork:
         return raw_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
 
     async def send_message(self, target_name_or_fp, text):
-        # Resolver fingerprint si nos dan nombre
+        # 1. Intentar encontrar al usuario en la lista de ONLINE (discovered)
         peer_info = self.discovered.get(target_name_or_fp)
         target_fp = target_name_or_fp
         
+        # Si nos han pasado un nombre en vez de un fingerprint, lo buscamos
         if not peer_info:
              target_lower = target_name_or_fp.lower()
-             for p in self.discovered.values():
-                 if target_lower in p['name'].lower() or target_lower in p.get('instance_name','').lower():
+             for fp, p in self.discovered.items():
+                 # Buscamos por nombre o por nombre de instancia
+                 p_name = p.get('name', '').lower()
+                 p_inst = p.get('instance_name', '').lower()
+                 if target_lower in p_name or target_lower in p_inst:
                      peer_info = p
-                     target_fp = p['fingerprint']
+                     target_fp = fp
                      break
         
-        # [CORRECCIÓN] Lógica Offline / Queueing
-        #if not peer_info:
-         #   print(f"💤 Usuario offline. Mensaje encolado para {target_fp[:8]}")
-          #  if target_fp not in self.message_queue:
-           #     self.message_queue[target_fp] = []
-            #self.message_queue[target_fp].append(text)
-            #return True # Pretendemos que se envió (se entregará luego)
+        # Si no lo encontramos en ONLINE, miramos si es un contacto de la AGENDA
+        if not peer_info and hasattr(self, 'trusted_contacts'):
+             if target_fp in self.trusted_contacts:
+                 # Es un contacto conocido, pero está OFFLINE
+                 pass # peer_info sigue siendo None, lo manejaremos abajo
+             else:
+                 # Quizás el user pasó un nombre de la agenda
+                 for fp, info in self.trusted_contacts.items():
+                     if info['name'].lower() == target_name_or_fp.lower():
+                         target_fp = fp
+                         break
 
-        # Proceso normal de envío
-        cid = self.connection_manager.get_cid_for_peer(target_fp)
-        if not cid:
-            cid = self.connection_manager.create_connection(target_fp, peer_info)
-            await self._send_handshake(cid, peer_info)
-            # Pequeña espera para handshake
-            await asyncio.sleep(0.5)
+        # 2. LOGICA OFFLINE / POSTCARDS
+        # Si peer_info es None, o la IP es "Offline" (del apaño anterior), ENCOLAMOS
+        is_offline = (peer_info is None) or (peer_info.get('ip') == 'Offline')
+
+        if is_offline:
+            print(f"💤 Usuario offline. Mensaje encolado para {target_fp[:8]}")
             
-        sid = self.connection_manager.create_stream(cid, 'text')
-        msg_bytes = msgpack.packb({'text': text, 'ts': time.time()})
-        encrypted = self.noise.encrypt_message(msg_bytes, target_fp)
-        
-        pkt = self.connection_manager.create_packet(cid, sid, MessageType.TEXT_MESSAGE, encrypted)
-        self.udp_transport.sendto(pkt, (peer_info['ip'], peer_info['port']))
-        return True
+            # Guardamos en la cola de memoria
+            if target_fp not in self.message_queue:
+                self.message_queue[target_fp] = []
+            
+            self.message_queue[target_fp].append(text)
+            
+            # Devolvemos True para que la Interfaz Gráfica muestre el mensaje
+            # como si se hubiera enviado (aunque se entregará luego)
+            return True 
+
+        # 3. LOGICA ONLINE (Solo llegamos aquí si tenemos IP y Puerto)
+        try:
+            cid = self.connection_manager.get_cid_for_peer(target_fp)
+            if not cid:
+                cid = self.connection_manager.create_connection(target_fp, peer_info)
+                await self._send_handshake(cid, peer_info)
+                # Pequeña espera para handshake
+                await asyncio.sleep(0.2)
+                
+            sid = self.connection_manager.create_stream(cid, 'text')
+            msg_bytes = msgpack.packb({'text': text, 'ts': time.time()})
+            encrypted = self.noise.encrypt_message(msg_bytes, target_fp)
+            
+            pkt = self.connection_manager.create_packet(cid, sid, MessageType.TEXT_MESSAGE, encrypted)
+            self.udp_transport.sendto(pkt, (peer_info['ip'], peer_info['port']))
+            return True
+        except Exception as e:
+            print(f"❌ Error enviando UDP: {e}")
+            return False
 
     async def _send_handshake(self, cid, peer_info):
         data, session = self.noise.initiate_handshake(None, peer_info['fingerprint'])
