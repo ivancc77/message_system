@@ -266,10 +266,27 @@ class CompleteNetwork:
         # [CORRECCIÓN] Cola de mensajes para entrega diferida (Postcards)
         self.message_queue = {} 
 
+        self.contacts_file = "contacts.json"
+        self.trusted_contacts = self._load_contacts()
+
         self.UDP_PORT = 6666
         self.SERVICE_TYPE = "_dni-im._udp.local."
         self.my_fingerprint = ""
         self.my_name = ""
+    
+    def _load_contacts(self):
+        if os.path.exists(self.contacts_file):
+            try:
+                with open(self.contacts_file, 'r') as f:
+                    return json.load(f)
+            except: return {}
+        return {}
+
+    def _save_contacts(self):
+        try:
+            with open(self.contacts_file, 'w') as f:
+                json.dump(self.trusted_contacts, f, indent=4)
+        except: pass
 
     def _load_identity(self) -> X25519PrivateKey:
         # Se mantiene igual
@@ -324,6 +341,24 @@ class CompleteNetwork:
         fp = info['fingerprint']
         if fp == self.my_fingerprint: return
         
+        name = info['name']
+        
+        # --- LÓGICA TOFU (Trust On First Use) ---
+        if fp in self.trusted_contacts:
+            # Ya lo conocemos, actualizamos nombre si ha cambiado (opcional)
+            stored_name = self.trusted_contacts[fp]['name']
+            info['name'] = stored_name # Mantenemos el nombre que nosotros confiamos
+        else:
+            # ¿Es un nombre que ya conocemos pero con OTRA clave? (ALERTA DE SEGURIDAD)
+            for trusted_fp, data in self.trusted_contacts.items():
+                if data['name'] == name and trusted_fp != fp:
+                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave! Podría ser un ataque.")
+                    info['name'] = f"{name} (NO VERIFICADO)"
+            
+            # Si es totalmente nuevo, lo guardamos (Trust First Use)
+            if fp not in self.trusted_contacts:
+                self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
+                self._save_contacts()
         # [CORRECCIÓN] Si el peer reaparece, intentamos enviar cola
         is_new = fp not in self.discovered
         self.discovered[fp] = info
