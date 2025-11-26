@@ -61,15 +61,15 @@ class GuiNetwork(CompleteNetwork):
         try:
             content = msgpack.unpackb(payload, raw=False)
             remote_fp = content.get('dnie_fingerprint')
-            static_bytes = content.get('static_public')
-            ephemeral_bytes = content.get('ephemeral_public')
+            #static_bytes = content.get('static_public')
+            #ephemeral_bytes = content.get('ephemeral_public')
             
             # Log UI limpio
             clean_name = self._get_clean_name(remote_fp)
             self.ui.log_system(f"🤝 Handshake recibido de {clean_name}")
             
             # Lógica crypto original (copiada para evitar el print del padre)
-            if self.noise.accept_handshake(static_bytes, ephemeral_bytes, remote_fp):
+            if self.noise.accept_handshake(content):
                 self.ui.log_system(f"🔒 Sesión establecida con {clean_name}")
             
             # Gestión de conexión
