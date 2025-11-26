@@ -4,6 +4,7 @@ import sys
 import time
 import msgpack
 import getpass
+import os
 
 # Importamos la librería de interfaz
 from prompt_toolkit import Application
@@ -13,12 +14,14 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.widgets import Frame, TextArea
 from prompt_toolkit.styles import Style
 from prompt_toolkit.key_binding import KeyBindings
+# [FIX WINDOWS] Necesario para que la TUI no se congele al redirigir stdout
+from prompt_toolkit.output import create_output 
 
 # Importamos TU código original
 from dnie_real import DNIeReal
 from network import CompleteNetwork
 
-# --- CLASE PARA CAPTURAR PRINTS (Solo cuando la UI esté lista) ---
+# --- CLASE PARA CAPTURAR PRINTS ---
 class StdoutRedirector:
     def __init__(self, ui_app):
         self.ui = ui_app
@@ -32,7 +35,11 @@ class StdoutRedirector:
             lines = self.buffer.split("\n")
             for line in lines[:-1]:
                 if line.strip():
-                    self.ui.log_system(f"⚙️ {line.strip()}")
+                    # Usamos call_soon_threadsafe por si viene de un hilo distinto
+                    try:
+                        self.ui.log_system(f"⚙️ {line.strip()}")
+                    except:
+                        pass
             self.buffer = lines[-1]
 
     def flush(self):
@@ -95,7 +102,7 @@ class TelegramTUI:
 
         # --- LAYOUT ---
         self.sidebar_control = FormattedTextControl(text=self.get_sidebar_text)
-        self.sidebar_window = Window(content=self.sidebar_control, width=25, style='class:sidebar', wrap_lines=False)
+        self.sidebar_window = Window(content=self.sidebar_control, width=30, style='class:sidebar', wrap_lines=False)
 
         self.chat_control = FormattedTextControl(text=self.get_chat_text)
         self.chat_window = Window(content=self.chat_control, style='class:chat.bg', wrap_lines=True, always_hide_cursor=True)
@@ -214,7 +221,7 @@ class TelegramTUI:
             self.log_system(f"❌ Error envío.")
 
     async def run(self):
-        # 1. NO REDIRIGIMOS TODAVÍA (Para ver errores de inicio)
+        # 1. MOSTRAR INICIO EN CONSOLA REAL
         print("⚡ Cargando identidad DNIe...") 
 
         # 2. Inicializar Hardware
@@ -222,17 +229,17 @@ class TelegramTUI:
             print(f"✅ DNIe OK: {self.dnie.get_user_name()}")
         else:
             print("❌ Error fatal: No se pudo leer el DNIe.")
-            print("   - Comprueba que está insertado.")
-            print("   - Comprueba que el PIN es correcto.")
-            return # SALIMOS AQUÍ si falla, para que veas el error en consola
+            return
 
         # 3. Arrancar Red
         print(f"📡 Iniciando red en puerto {self.port}...")
         self.network.UDP_PORT = self.port 
         await self.network.start(self.username)
         
-        # 4. AHORA SÍ: Activamos modo gráfico y ocultamos prints
-        # Redirigimos prints al log interno
+        # 4. PREPARAR CAPTURA DE LOGS [FIX WINDOWS]
+        # Guardamos la salida real para que prompt_toolkit pueda dibujar
+        real_stdout = sys.__stdout__
+        # Redirigimos sys.stdout de Python a nuestro log interno
         sys.stdout = StdoutRedirector(self)
         sys.stderr = StdoutRedirector(self)
         
@@ -241,17 +248,22 @@ class TelegramTUI:
             key_bindings=self.kb,
             style=self.style,
             full_screen=True,
-            mouse_support=True
+            mouse_support=True,
+            # [CRÍTICO] Le decimos a la TUI que use la salida REAL, no la capturada
+            output=create_output(stdout=real_stdout)
         )
         
-        # Log inicial dentro de la app
         self.log_system("🚀 Interfaz Iniciada. Esperando peers...")
         
         await self.app.run_async()
         await self.network.stop()
 
 if __name__ == "__main__":
-    print("=== DNIe Messenger TUI v4.1 (Fix Boot) ===")
+    # [FIX CRÍTICO PARA WINDOWS] Configurar el Event Loop correcto
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    print("=== DNIe Messenger TUI v4.2 (Win Fix) ===")
     u_user = input("Tu Nombre: ") or "Usuario"
     u_port = int(input("Puerto UDP (6666): ") or 6666)
     try:
@@ -265,3 +277,7 @@ if __name__ == "__main__":
         asyncio.run(tui.run())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        # Recuperar stdout para ver el error si explota
+        sys.stdout = sys.__stdout__
+        print(f"CRASH: {e}")
