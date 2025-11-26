@@ -149,6 +149,8 @@ class NoiseIKProtocol:
             info=b'DNI-IM-v2',
         )
         key_material = hkdf.derive(es + ss)
+
+        print(f"🔑 DEBUG KEY MATERIAL: {key_material.hex()[:10]}...")
         
         return {
             'send_cipher': ChaCha20Poly1305(key_material[:32]),
