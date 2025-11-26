@@ -381,7 +381,28 @@ class CompleteNetwork:
                 await self.send_message(fp, txt)
                 await asyncio.sleep(0.1)
 
-    def get_peers(self): return list(self.discovered.values())
+    def get_peers(self):
+        # 1. Cogemos a los que están ONLINE (detectados ahora mismo)
+        all_peers = list(self.discovered.values())
+        online_fps = {p['fingerprint'] for p in all_peers}
+
+        # 2. Añadimos a los de la AGENDA (contacts.json) si no están online
+        if hasattr(self, 'trusted_contacts'):
+            for fp, info in self.trusted_contacts.items():
+                if fp not in online_fps:
+                    # Creamos un "peer fantasma" para que salga en la lista
+                    # Le ponemos (OFF) en el nombre para que sepas que no está conectado
+                    clean_name = info['name'].replace("(AUTENTICACIÓN)", "").strip()
+                    offline_peer = {
+                        'fingerprint': fp,
+                        'name': f"{clean_name} (OFF)", 
+                        'ip': 'Offline',
+                        'port': 0,
+                        'instance_name': 'offline'
+                    }
+                    all_peers.append(offline_peer)
+        
+        return all_peers
     
     def _get_clean_name(self, fp):
         peer = self.discovered.get(fp)
