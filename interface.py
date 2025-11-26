@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 import asyncio
-import struct
-import socket
-import getpass
+import sys
 import time
 import msgpack
-import sys
 
 # Importamos la librería de interfaz
 from prompt_toolkit import Application
@@ -16,164 +13,118 @@ from prompt_toolkit.widgets import Frame, TextArea
 from prompt_toolkit.styles import Style
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.formatted_text import to_formatted_text
-from cryptography.hazmat.primitives import serialization
 
+# Importamos TU código original
 from dnie_real import DNIeReal
 from network import CompleteNetwork, MessageType
 
-# --- ADAPTADOR DE RED BLINDADO (Totalmente Silencioso) ---
+# --- CLASE MÁGICA PARA CAPTURAR PRINTS ---
+class StdoutRedirector:
+    """
+    Atrapa todos los print() de network.py y los manda a la ventanita de logs
+    para que no rompan la interfaz visual.
+    """
+    def __init__(self, ui_app):
+        self.ui = ui_app
+        self.buffer = ""
+
+    def write(self, text):
+        # Acumulamos texto hasta ver un salto de línea
+        self.buffer += text
+        if "\n" in self.buffer:
+            lines = self.buffer.split("\n")
+            for line in lines[:-1]:
+                if line.strip():
+                    # Mandamos el texto limpio al log visual
+                    self.ui.log_system(f"⚙️ {line.strip()}")
+            self.buffer = lines[-1]
+
+    def flush(self):
+        pass
+
+# --- ADAPTADOR DE RED PARA LA UI ---
 class GuiNetwork(CompleteNetwork):
-    """
-    Versión modificada de la red que REEMPLAZA completamente la lógica
-    de impresión para que NADA salga por consola y rompa la interfaz.
-    """
+    """Adaptador que conecta la red con la interfaz"""
     def __init__(self, dnie, ui_app):
         super().__init__(dnie)
         self.ui = ui_app
- 
+
+    # Sobrescribimos para actualizar la barra lateral visualmente
     def add_discovered_peer(self, info):
         fp = info['fingerprint']
         if fp == self.my_fingerprint: return
         
-        if fp not in self.discovered:
-            # Lógica original pero sin print
-            self.discovered[fp] = info
-            
-            # Log visual en UI
-            name = info.get('name', 'Desconocido')
-            ip = info.get('ip', '?')
-            self.ui.log_system(f"🔍 Peer descubierto: {name} ({ip})")
-            self.ui.update_sidebar()
+        # Lógica original
+        super().add_discovered_peer(info)
+        
+        # Actualizar UI
+        self.ui.log_system(f"🔍 Peer detectado: {info.get('name')} ({info.get('ip')})")
+        self.ui.update_ui()
 
-    # REEMPLAZAMOS (Sin llamar a super)
+    # Sobrescribimos para mandar mensajes a la ventana de chat
     def _handle_text(self, payload, remote_fp):
         try:
-            # 1. Intentamos desencriptar
+            # 1. Desencriptar
             decrypted = self.noise.decrypt_message(payload, remote_fp)
             
-            # 2. Intentamos leer el contenido
+            # 2. Desempaquetar
             try:
                 data = msgpack.unpackb(decrypted, raw=False)
             except:
-                # Si falla aquí, es que decrypt devolvió basura o el mensaje no es msgpack
-                self.ui.log_system(f"⚠️ Error: Mensaje mal formado de {remote_fp[:8]}")
+                self.ui.log_system(f"⚠️ Error unpack msg de {remote_fp[:8]}")
                 return
 
             text = data.get('text')
             
-            # 3. ¡LOG DE ÉXITO! (Esto nos dirá si llega)
-            clean_name = self._get_clean_name(remote_fp)
-            self.ui.log_system(f"📨 RECIBIDO de {clean_name}: {text}")
-
-            # 4. Lo mandamos a la ventana de chat
+            # 3. Mostrar en UI
             self.ui.add_message(remote_fp, text, is_me=False)
             
-            # 5. Forzamos actualización visual inmediata
-            from prompt_toolkit.application.current import get_app
-            get_app().invalidate()
-
         except Exception as e:
-            self.ui.log_system(f"❌ Error CRÍTICO procesando msg: {e}")
+            self.ui.log_system(f"❌ Error recibiendo msg: {e}")
 
-    # REEMPLAZAMOS la lógica completa del Handshake Init
-    def _handle_handshake_init(self, cid, payload, addr):
-        try:
-            content = msgpack.unpackb(payload, raw=False)
-            remote_fp = content.get('dnie_fingerprint')
-            #static_bytes = content.get('static_public')
-            #ephemeral_bytes = content.get('ephemeral_public')
-            
-            # Log UI limpio
-            clean_name = self._get_clean_name(remote_fp)
-            self.ui.log_system(f"🤝 Handshake recibido de {clean_name}")
-            
-            # Lógica crypto original (copiada para evitar el print del padre)
-            if self.noise.accept_handshake(content):
-                self.ui.log_system(f"🔒 Sesión establecida con {clean_name}")
-            
-            # Gestión de conexión
-            if not self.connection_manager.get_cid_for_peer(remote_fp):
-                self.connection_manager.create_connection(remote_fp, {'ip': addr[0], 'port': addr[1]})
-                if remote_fp not in self.discovered:
-                     self.discovered[remote_fp] = {
-                        'fingerprint': remote_fp,
-                        'name': "Desconocido", 
-                        'ip': addr[0], 
-                        'port': addr[1]
-                    }
-                    
-            # Responder
-            my_static = self.noise.static_public.public_bytes(
-                encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
-            ack_payload = msgpack.packb({'ack': True, 'static_public': my_static})
-            pkt = self.connection_manager.create_packet(cid, 0, MessageType.HANDSHAKE_RESPONSE, ack_payload)
-            self.udp_transport.sendto(pkt, addr)
-            
-            self.ui.update_sidebar()
-            
-        except Exception as e:
-            self.ui.log_system(f"❌ Error handshake init: {e}")
-
-    # REEMPLAZAMOS la lógica completa del Handshake Response
-    def _handle_handshake_response(self, payload, remote_fp):
-        try:
-            content = msgpack.unpackb(payload, raw=False)
-            if content.get('ack') and remote_fp:
-                remote_static = content.get('static_public')
-                if remote_static:
-                    # Lógica crypto
-                    if self.noise.update_session_with_peer_key(remote_static, remote_fp):
-                         clean_name = self._get_clean_name(remote_fp)
-                         # Log UI limpio (El culpable del error anterior era el print de aquí)
-                         self.ui.log_system(f"✅ Handshake COMPLETADO con {clean_name}")
-        except Exception as e:
-            self.ui.log_system(f"❌ Error respuesta handshake: {e}")
-
-# --- LÓGICA DE LA INTERFAZ GRÁFICA (Igual que v2.3) ---
+# --- INTERFAZ GRÁFICA (TUI) ---
 class TelegramTUI:
     def __init__(self, username, port, pin):
         self.username = username
         self.port = port
         self.pin = pin
         
-        self.current_chat_fp = None
+        self.current_chat_fp = "SYSTEM" # Empezamos en la pestaña de logs
         self.messages = {} 
         self.system_logs = []
         
         self.dnie = DNIeReal()
         self.network = GuiNetwork(self.dnie, self)
 
-        # --- ESTILOS ---
+        # --- ESTILOS VISUALES ---
         self.style = Style.from_dict({
-            'sidebar': 'bg:#232323 #888888',
-            'sidebar.selected': 'bg:#2d2d2d #ffffff bold',
+            'sidebar': 'bg:#232323 #aaaaaa',
+            'sidebar.selected': 'bg:#005fce #ffffff bold',
             'sidebar.header': 'bg:#00aaaa #ffffff bold',
             'chat.bg': 'bg:#1e1e1e #ffffff',
-            'input': 'bg:#232323 #ffffff',
-            'top-bar': 'bg:#181818 #64b5f6 bold',
-            'msg.me': '#64b5f6',       
-            'msg.them': '#81c784',     
+            'input': 'bg:#333333 #ffffff',
+            'top-bar': 'bg:#181818 #81c784 bold',
+            'msg.me': '#64b5f6 bold',       
+            'msg.them': '#81c784 bold',     
             'msg.time': '#555555 italic',
-            'system': '#ffb74d italic'
+            'system.log': '#ffb74d italic',
+            'system.prefix': '#aaaaaa'
         })
 
-        # --- WIDGETS ---
+        # --- COMPONENTES ---
         self.sidebar_control = FormattedTextControl(text=self.get_sidebar_text)
         self.sidebar_window = Window(
             content=self.sidebar_control, 
-            width=30, 
+            width=25, 
             style='class:sidebar', 
             wrap_lines=False
         )
 
         self.chat_control = FormattedTextControl(text=self.get_chat_text)
-        
-        # Scroll fijo al final
         self.chat_window = Window(
             content=self.chat_control, 
             style='class:chat.bg', 
             wrap_lines=True,
-            get_vertical_scroll=lambda w: 100000, 
             always_hide_cursor=True
         )
 
@@ -189,10 +140,10 @@ class TelegramTUI:
         self.header_control = FormattedTextControl(text=self.get_header_text)
         self.header_window = Window(content=self.header_control, height=1, style='class:top-bar')
 
-        # --- LAYOUT ---
+        # --- LAYOUT PRINCIPAL ---
         self.layout = VSplit([
             HSplit([
-                Window(FormattedTextControl([("class:sidebar.header", " TelegramTUI v3.0 ")]), height=1),
+                Window(FormattedTextControl([("class:sidebar.header", " DNIe Messenger ")]), height=1),
                 self.sidebar_window
             ]),
             HSplit([
@@ -204,6 +155,7 @@ class TelegramTUI:
 
         self.kb = KeyBindings()
         
+        @self.kb.add('c-c')
         @self.kb.add('c-q')
         def _(event):
             event.app.exit()
@@ -212,128 +164,157 @@ class TelegramTUI:
         def _(event):
             self.cycle_chat()
 
-    # --- MÉTODOS DE REDIBUJADO ---
+    # --- GENERADORES DE TEXTO UI ---
     def get_sidebar_text(self):
         result = []
-        peers = self.network.get_peers()
         
-        style_sys = "class:sidebar.selected" if self.current_chat_fp == "SYSTEM" else ""
-        result.append((style_sys, " 📢 System Logs\n"))
+        # Opción 1: System Logs
+        if self.current_chat_fp == "SYSTEM":
+            result.append(("class:sidebar.selected", " 📢 System Logs\n"))
+        else:
+            result.append(("", " 📢 System Logs\n"))
 
+        # Opción 2+: Peers
+        peers = self.network.get_peers()
         for p in peers:
             fp = p['fingerprint']
-            name = p.get('name', 'Unknown')[:20]
+            # Limpiar nombre
+            name = p.get('name', 'Unknown')[:15]
             name = name.replace("(AUTENTICACIÓN)", "").strip()
             
-            style_peer = "class:sidebar.selected" if fp == self.current_chat_fp else ""
-            result.append((style_peer, f" 👤 {name}\n"))
+            # Indicador de mensajes no leídos (opcional, visual)
+            prefix = " 👤 "
+            
+            if fp == self.current_chat_fp:
+                result.append(("class:sidebar.selected", f"{prefix}{name}\n"))
+            else:
+                result.append(("", f"{prefix}{name}\n"))
             
         return result
 
     def get_chat_text(self):
+        # Caso A: Logs del sistema
         if self.current_chat_fp == "SYSTEM":
-            return self.system_logs
+            # Autoscroll: mostrar ultimos 50 logs
+            return self.system_logs[-50:]
         
+        # Caso B: Chat vacío
         if not self.current_chat_fp:
-            return [("", "\n\n   Selecciona un chat con TAB...")]
+            return [("", "\n   Selecciona un usuario con TAB...")]
         
+        # Caso C: Chat normal
         msgs = self.messages.get(self.current_chat_fp, [])
         if not msgs:
-            return [("", "\n   No hay mensajes. Escribe para iniciar...")]
+            return [("", "\n   📭 No hay mensajes previos. ¡Escribe 'hola'!")]
         
         return msgs
 
     def get_header_text(self):
-        if not self.current_chat_fp: return [("", " DNIe Messenger")]
-        if self.current_chat_fp == "SYSTEM": return [("", " Logs del Sistema")]
+        if self.current_chat_fp == "SYSTEM": 
+            return [("", " 🖥️  Logs de Depuración y Red")]
         
         name = self.current_chat_fp[:8]
+        # Buscar nombre real
         for p in self.network.get_peers():
             if p['fingerprint'] == self.current_chat_fp:
                 name = p.get('name', name).replace("(AUTENTICACIÓN)", "").strip()
                 break
-        return [("", f" 💬 {name}  |  "), ("#81c784", "Online")]
+        
+        return [
+            ("", f" 💬 Chat con: "),
+            ("bold", f"{name}"),
+            ("", "  |  Estado: "),
+            ("#a5d6a7", "Conectado y Seguro (NoiseIK)")
+        ]
 
-    # --- LÓGICA UI ---
-    def update_sidebar(self):
-        get_app().invalidate()
+    # --- LÓGICA DE ACTUALIZACIÓN ---
+    def update_ui(self):
+        # Fuerza el redibujado de la pantalla
+        try:
+            get_app().invalidate()
+        except: pass
 
     def log_system(self, text):
         t = time.strftime("%H:%M")
-        self.system_logs.append(("class:msg.time", f"[{t}] "))
-        self.system_logs.append(("class:system", f"{text}\n"))
-        if self.current_chat_fp == "SYSTEM":
-             get_app().invalidate()
+        self.system_logs.append(("class:system.prefix", f"[{t}] "))
+        self.system_logs.append(("class:system.log", f"{text}\n"))
+        self.update_ui()
 
     def add_message(self, fp, text, is_me=True):
         if fp not in self.messages: self.messages[fp] = []
         
         t = time.strftime("%H:%M")
         if is_me:
-            prefix_style = "class:msg.me bold"
-            prefix_text = "Yo: "
+            prefix = [("class:msg.me", "Yo: ")]
         else:
-            prefix_style = "class:msg.them bold"
+            # Buscar nombre limpio
             name = "Peer"
             for p in self.network.get_peers():
                 if p['fingerprint'] == fp:
-                    name = p['name'].replace("(AUTENTICACIÓN)", "").strip().split()[0]
+                    name = p['name'].replace("(AUTENTICACIÓN)", "").split()[0]
                     break
-            prefix_text = f"{name}: "
+            prefix = [("class:msg.them", f"{name}: ")]
         
-        msg_line = [
-            (prefix_style, prefix_text),
-            ("", f"{text} "),
-            ("class:msg.time", f"{t}\n")
-        ]
+        msg_line = prefix + [("", f"{text} "), ("class:msg.time", f"{t}\n")]
         
         self.messages[fp].extend(msg_line)
-        get_app().invalidate()
+        self.update_ui()
 
     def cycle_chat(self):
         peers = self.network.get_peers()
-        fps = ["SYSTEM"] + [p['fingerprint'] for p in peers]
-        if not self.current_chat_fp:
-            self.current_chat_fp = fps[0]
+        # Lista de IDs: SYSTEM + fingerprints de peers
+        ids = ["SYSTEM"] + [p['fingerprint'] for p in peers]
+        
+        if not ids: return
+
+        if self.current_chat_fp in ids:
+            curr_idx = ids.index(self.current_chat_fp)
+            next_idx = (curr_idx + 1) % len(ids)
+            self.current_chat_fp = ids[next_idx]
         else:
-            try:
-                idx = fps.index(self.current_chat_fp)
-                self.current_chat_fp = fps[(idx + 1) % len(fps)]
-            except:
-                self.current_chat_fp = fps[0]
-        get_app().invalidate()
+            self.current_chat_fp = "SYSTEM"
+            
+        self.update_ui()
 
     def on_send_enter(self, buff):
         text = self.input_field.text.strip()
         if not text: return
-        if not self.current_chat_fp or self.current_chat_fp == "SYSTEM":
-            self.log_system("⚠️ Selecciona un usuario con TAB para enviar.")
+        
+        if self.current_chat_fp == "SYSTEM" or not self.current_chat_fp:
+            self.log_system("⚠️ No puedes escribir en los logs. Pulsa TAB para elegir un chat.")
             self.input_field.buffer.reset()
             return
+            
         asyncio.create_task(self._send_wrapper(self.current_chat_fp, text))
 
     async def _send_wrapper(self, fp, text):
         self.input_field.buffer.reset()
+        # Intentar enviar
         ok = await self.network.send_message(fp, text)
         if ok:
             self.add_message(fp, text, is_me=True)
         else:
-            self.log_system(f"❌ Error enviando mensaje.")
+            self.log_system(f"❌ Error enviando mensaje a {fp[:8]}.")
 
     async def run(self):
-        # 1. Inicializar DNIe
-        print("Iniciando DNIe (mira el lector)...")
-        if await self.dnie.initialize(self.pin, interactive=False):
-            print("DNIe OK.")
-        else:
-            print("Fallo DNIe. Saliendo.")
-            return
+        # 1. Redirigir prints para que no rompan la UI
+        sys.stdout = StdoutRedirector(self)
+        sys.stderr = StdoutRedirector(self) # También capturamos errores
+        
+        print("Iniciando Interfaz DNIe...") # Esto ahora irá al log visual
 
-        # 2. Iniciar Red
+        # 2. Inicializar Hardware
+        if await self.dnie.initialize(self.pin, interactive=False):
+            print(f"DNIe OK: {self.dnie.get_user_name()}")
+        else:
+            print("❌ Fallo DNIe. Revisa lector.")
+            # No salimos, permitimos ver el error
+            
+        # 3. Arrancar Red
         self.network.UDP_PORT = self.port 
         await self.network.start(self.username)
         
-        # 3. Iniciar UI Loop
+        # 4. Bucle UI
         self.app = Application(
             layout=Layout(self.layout),
             key_bindings=self.kb,
@@ -342,19 +323,30 @@ class TelegramTUI:
             mouse_support=True
         )
         await self.app.run_async()
+        
+        # 5. Limpieza al salir
         await self.network.stop()
 
 if __name__ == "__main__":
-    print("=== DNIe Messenger TUI v3.0 (Fixed) ===")
-    u_user = input("Nombre Usuario: ") or "Usuario"
+    # Restauramos stdout real para estos inputs iniciales
+    original_stdout = sys.stdout
+    
+    print("=== DNIe Messenger TUI v4.0 (Final) ===")
+    u_user = input("Tu Nombre: ") or "Usuario"
     u_port = int(input("Puerto UDP (6666): ") or 6666)
+    import getpass
     try:
         u_pin = getpass.getpass("PIN DNIe: ")
     except:
         u_pin = input("PIN: ")
 
     tui = TelegramTUI(u_user, u_port, u_pin)
+    
     try:
         asyncio.run(tui.run())
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        # Si explota todo, recuperamos stdout para ver por qué
+        sys.stdout = original_stdout
+        print(f"CRASH: {e}")
