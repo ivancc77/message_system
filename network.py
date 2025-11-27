@@ -228,7 +228,9 @@ class SimpleListener(ServiceListener):
         self.network = network
     
     def update_service(self, zc, type_, name): pass
-    def remove_service(self, zc, type_, name): pass
+    def remove_service(self, zc, type_, name): 
+        clean_name = name.replace("." + type_, "")
+        self.network.remove_discovered_peer(clean_name)
     def add_service(self, zc, type_, name):
         asyncio.create_task(self.resolve_async(zc, type_, name))
 
@@ -365,6 +367,23 @@ class CompleteNetwork:
         
         if is_new or fp in self.message_queue:
             asyncio.create_task(self._flush_message_queue(fp))
+
+    def remove_discovered_peer(self, instance_name):
+        """
+        Se llama cuando mDNS nos avisa de que alguien se desconectó.
+        Lo borramos de la RAM (discovered) para que el sistema pase a usar
+        la información de la agenda (contacts.json) y marque como (OFF).
+        """
+        fp_to_remove = None
+        # Buscamos qué fingerprint corresponde a ese nombre de servicio
+        for fp, info in self.discovered.items():
+            if info.get('instance_name') == instance_name:
+                fp_to_remove = fp
+                break
+        
+        if fp_to_remove:
+            print(f"📉 Peer desconectado: {fp_to_remove[:8]}")
+            del self.discovered[fp_to_remove]
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
     async def _flush_message_queue(self, fp):

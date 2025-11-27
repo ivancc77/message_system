@@ -58,6 +58,16 @@ class GuiNetwork(CompleteNetwork):
         self.ui.log_system(f"🔍 Peer detectado: {info.get('name')} ({info.get('ip')})")
         self.ui.update_ui()
 
+    def remove_discovered_peer(self, instance_name):
+        # 1. Llamamos a la lógica original para borrarlo de la lista online
+        super().remove_discovered_peer(instance_name)
+        
+        # 2. Avisamos a la interfaz: "¡Oye, repinta la lista!"
+        # Como ahora no está en 'discovered', get_peers() lo cogerá del JSON
+        # y le pondrá la etiqueta (OFF).
+        self.ui.log_system(f"📉 Un usuario se ha desconectado.")
+        self.ui.update_ui()
+
     def _handle_text(self, payload, remote_fp):
         try:
             decrypted = self.noise.decrypt_message(payload, remote_fp)
