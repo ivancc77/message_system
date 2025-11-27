@@ -35,7 +35,6 @@ class StdoutRedirector:
             lines = self.buffer.split("\n")
             for line in lines[:-1]:
                 if line.strip():
-                    # Usamos call_soon_threadsafe por si viene de un hilo distinto
                     try:
                         self.ui.log_system(f"⚙️ {line.strip()}")
                     except:
@@ -58,14 +57,12 @@ class GuiNetwork(CompleteNetwork):
         self.ui.log_system(f"🔍 Peer detectado: {info.get('name')} ({info.get('ip')})")
         self.ui.update_ui()
 
+    # [NUEVO] ESTO ES LO QUE TE FALTABA PARA EL (OFF)
     def remove_discovered_peer(self, instance_name):
-        # 1. Llamamos a la lógica original para borrarlo de la lista online
+        # 1. Borramos de la lógica de red
         super().remove_discovered_peer(instance_name)
-        
-        # 2. Avisamos a la interfaz: "¡Oye, repinta la lista!"
-        # Como ahora no está en 'discovered', get_peers() lo cogerá del JSON
-        # y le pondrá la etiqueta (OFF).
-        self.ui.log_system(f"📉 Un usuario se ha desconectado.")
+        # 2. Avisamos a la UI para que repinte la lista (y salga el OFF)
+        self.ui.log_system(f"📉 Peer desconectado (Pasando a Offline).")
         self.ui.update_ui()
 
     def _handle_text(self, payload, remote_fp):
@@ -151,14 +148,25 @@ class TelegramTUI:
         else:
             result.append(("", " 📢 System Logs\n"))
 
+        # Aquí usamos la lógica nueva de get_peers() que incluye los OFFLINE
         peers = self.network.get_peers()
         for p in peers:
             fp = p['fingerprint']
-            name = p.get('name', 'Unknown')[:15].replace("(AUTENTICACIÓN)", "").strip()
+            # Nombre limpio y truncado
+            raw_name = p.get('name', 'Unknown')
+            name = raw_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()[:18]
+            
+            # Icono diferente si está OFFLINE
+            icon = "👤"
+            if "(OFF)" in name or p.get('ip') == 'Offline':
+                icon = "💤"
+            
+            line_text = f" {icon} {name}\n"
+
             if fp == self.current_chat_fp:
-                result.append(("class:sidebar.selected", f" 👤 {name}\n"))
+                result.append(("class:sidebar.selected", line_text))
             else:
-                result.append(("", f" 👤 {name}\n"))
+                result.append(("", line_text))
         return result
 
     def get_chat_text(self):
@@ -171,12 +179,28 @@ class TelegramTUI:
 
     def get_header_text(self):
         if self.current_chat_fp == "SYSTEM": return [("", " 🖥️  Logs de Depuración")]
+        
+        # Buscar nombre e info
         name = self.current_chat_fp[:8]
+        status = "Desconocido"
+        style_status = "#aaaaaa"
+
+        # Buscamos en la lista completa (online + offline)
         for p in self.network.get_peers():
             if p['fingerprint'] == self.current_chat_fp:
                 name = p.get('name', name).replace("(AUTENTICACIÓN)", "").strip()
+                if "(OFF)" in name or p.get('ip') == 'Offline':
+                    status = "Desconectado (Cola de Mensajes)"
+                    style_status = "#ff5555"
+                else:
+                    status = "Conectado y Seguro"
+                    style_status = "#55ff55"
                 break
-        return [("", " 💬 Chat con: "), ("bold", f"{name}"), ("", " | NoiseIK Seguro")]
+                
+        return [
+            ("", " 💬 Chat con: "), ("bold", f"{name}"), 
+            ("", " | Estado: "), (style_status, status)
+        ]
 
     # --- FUNCIONES ---
     def update_ui(self):
@@ -225,31 +249,26 @@ class TelegramTUI:
 
     async def _send_wrapper(self, fp, text):
         self.input_field.buffer.reset()
+        # send_message ahora devuelve True si se envió o si se ENCOLÓ
         if await self.network.send_message(fp, text):
             self.add_message(fp, text, is_me=True)
         else:
             self.log_system(f"❌ Error envío.")
 
     async def run(self):
-        # 1. MOSTRAR INICIO EN CONSOLA REAL
         print("⚡ Cargando identidad DNIe...") 
 
-        # 2. Inicializar Hardware
         if await self.dnie.initialize(self.pin, interactive=False):
             print(f"✅ DNIe OK: {self.dnie.get_user_name()}")
         else:
             print("❌ Error fatal: No se pudo leer el DNIe.")
             return
 
-        # 3. Arrancar Red
         print(f"📡 Iniciando red en puerto {self.port}...")
         self.network.UDP_PORT = self.port 
         await self.network.start(self.username)
         
-        # 4. PREPARAR CAPTURA DE LOGS [FIX WINDOWS]
-        # Guardamos la salida real para que prompt_toolkit pueda dibujar
         real_stdout = sys.__stdout__
-        # Redirigimos sys.stdout de Python a nuestro log interno
         sys.stdout = StdoutRedirector(self)
         sys.stderr = StdoutRedirector(self)
         
@@ -259,21 +278,25 @@ class TelegramTUI:
             style=self.style,
             full_screen=True,
             mouse_support=True,
-            # [CRÍTICO] Le decimos a la TUI que use la salida REAL, no la capturada
             output=create_output(stdout=real_stdout)
         )
         
         self.log_system("🚀 Interfaz Iniciada. Esperando peers...")
         
-        await self.app.run_async()
-        await self.network.stop()
+        try:
+            await self.app.run_async()
+        finally:
+            # [CRÍTICO] Esto asegura que siempre nos despedimos de la red
+            # aunque cerremos con Ctrl+C o error
+            sys.stdout = real_stdout # Recuperar consola
+            print("Cerrando conexiones y enviando despedida mDNS...")
+            await self.network.stop()
 
 if __name__ == "__main__":
-    # [FIX CRÍTICO PARA WINDOWS] Configurar el Event Loop correcto
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    print("=== DNIe Messenger TUI v4.2 (Win Fix) ===")
+    print("=== DNIe Messenger TUI v5.0 (Offline Ready) ===")
     u_user = input("Tu Nombre: ") or "Usuario"
     u_port = int(input("Puerto UDP (6666): ") or 6666)
     try:
@@ -288,6 +311,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        # Recuperar stdout para ver el error si explota
         sys.stdout = sys.__stdout__
         print(f"CRASH: {e}")
