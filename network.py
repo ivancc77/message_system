@@ -228,15 +228,26 @@ class SimpleListener(ServiceListener):
         self.network = network
     
     def update_service(self, zc, type_, name): pass
-    def remove_service(self, zc, type_, name): 
+    
+    def remove_service(self, zc, type_, name):
+        # AVISO DE DESCONEXIÓN
+        print(f"DEBUG: Recibido evento REMOVE para {name}")
+        # Limpiamos el nombre exactamente igual que al añadirlo
         clean_name = name.replace("." + type_, "")
+        # Quitamos el punto final si ha quedado alguno (frecuente en mDNS)
+        if clean_name.endswith('.'):
+            clean_name = clean_name[:-1]
+            
         self.network.remove_discovered_peer(clean_name)
+
     def add_service(self, zc, type_, name):
         asyncio.create_task(self.resolve_async(zc, type_, name))
 
     def __call__(self, zeroconf, service_type, name, state_change):
         if state_change == ServiceStateChange.Added:
             self.add_service(zeroconf, service_type, name)
+        elif state_change == ServiceStateChange.Removed:
+            self.remove_service(zeroconf, service_type, name)
     
     async def resolve_async(self, zc, type_, name):
         try:
@@ -244,7 +255,10 @@ class SimpleListener(ServiceListener):
             if info:
                 props = {k.decode('utf-8', 'ignore'): v.decode('utf-8', 'ignore') 
                          for k, v in info.properties.items()}
+                
                 clean_name = name.replace("." + type_, "")
+                if clean_name.endswith('.'): clean_name = clean_name[:-1]
+
                 peer_info = {
                     'name': props.get('real_name', clean_name),
                     'fingerprint': props.get('fingerprint', ''),
@@ -369,21 +383,23 @@ class CompleteNetwork:
             asyncio.create_task(self._flush_message_queue(fp))
 
     def remove_discovered_peer(self, instance_name):
-        """
-        Se llama cuando mDNS nos avisa de que alguien se desconectó.
-        Lo borramos de la RAM (discovered) para que el sistema pase a usar
-        la información de la agenda (contacts.json) y marque como (OFF).
-        """
         fp_to_remove = None
-        # Buscamos qué fingerprint corresponde a ese nombre de servicio
+        
+        # Buscamos coincidencias (exactas o parciales)
         for fp, info in self.discovered.items():
-            if info.get('instance_name') == instance_name:
+            stored_name = info.get('instance_name', '')
+            # Comparamos ignorando mayúsculas y posibles puntos finales
+            if stored_name.strip('.') == instance_name.strip('.'):
                 fp_to_remove = fp
                 break
         
         if fp_to_remove:
-            print(f"📉 Peer desconectado: {fp_to_remove[:8]}")
+            # Borramos de la lista de ONLINE
             del self.discovered[fp_to_remove]
+            # Si estamos usando interfaz gráfica, esto disparará el update_ui
+            # en el archivo interface.py, y como ya no está en 'discovered',
+            # get_peers() lo cogerá del JSON y le pondrá el (OFF).
+            print(f"📉 Peer pasado a OFFLINE: {fp_to_remove[:8]}")
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
     async def _flush_message_queue(self, fp):
