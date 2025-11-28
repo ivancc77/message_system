@@ -282,6 +282,7 @@ class CompleteNetwork:
         
         # [CORRECCIÓN] Cola de mensajes para entrega diferida (Postcards)
         self.message_queue = {} 
+        self.handshake_in_progress = {}
 
         self.contacts_file = "contacts.json"
         self.trusted_contacts = self._load_contacts()
@@ -384,7 +385,7 @@ class CompleteNetwork:
         
         name = info['name']
         
-        # --- Lógica de Contactos (Se mantiene igual) ---
+        # --- Lógica TOFU (Mantenemos tu seguridad) ---
         if fp in self.trusted_contacts:
             info['name'] = self.trusted_contacts[fp]['name']
         else:
@@ -392,21 +393,29 @@ class CompleteNetwork:
                 self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
                 self._save_contacts()
 
-        # 1. ACTUALIZAMOS LA INFO (IP/Puerto nuevos)
         self.discovered[fp] = info
         
-        # 2. GESTIÓN DE LA COLA
-        # Si tenemos mensajes pendientes para él...
+        # --- LÓGICA DE RECONEXIÓN SEGURA ---
+        # Si hay cola de mensajes, hay que reconectar, PERO con cuidado.
         if fp in self.message_queue and self.message_queue[fp]:
+            
+            # [NUEVO] EL FRENO: Si ya iniciamos un handshake hace poco, NO hacemos nada.
+            # Esto evita que el mDNS repetido rompa la encriptación a medio proceso.
+            last_attempt = self.handshake_in_progress.get(fp, 0)
+            if time.time() - last_attempt < 10:
+                print(f"⏳ Ignorando señal repetida de {name} (Handshake en proceso...)")
+                return
+
             print(f"📬 Reencontrado a {name}. Borrando sesión vieja y reconectando...")
             
-            # [CLAVE] Borramos la sesión anterior COMPLETAMENTE.
-            # Esto obliga a generar un nuevo CID (ID de conexión) que el receptor sí aceptará.
+            # Marcamos que estamos trabajando en este peer
+            self.handshake_in_progress[fp] = time.time()
+
+            # 1. Borrado total de la sesión anterior (Clean Slate)
             self._clear_peer_state(fp)
             
-            # Iniciamos el saludo (Handshake). 
-            # NOTA: No enviamos los mensajes aquí. Se enviarán solos cuando 
-            # llegue la respuesta del handshake (_handle_handshake_response).
+            # 2. Iniciamos handshake. Los mensajes saldrán SOLOS cuando
+            # se reciba la respuesta en _handle_handshake_response
             asyncio.create_task(self._initiate_handshake_only(fp, info))
 
     async def _initiate_handshake_only(self, fp, info):
@@ -640,6 +649,9 @@ class CompleteNetwork:
                 if remote_static:
                     if self.noise.update_session_with_peer_key(remote_static, remote_fp):
                          print(f"✅ Handshake COMPLETADO con {self._get_clean_name(remote_fp)}")
+                         # [NUEVO] Ya hemos terminado, liberamos el freno.
+                         if remote_fp in self.handshake_in_progress:
+                             del self.handshake_in_progress[remote_fp]
                          # Intentar vaciar cola si había mensajes pendientes
                          asyncio.create_task(self._flush_message_queue(remote_fp))
         except Exception as e:
