@@ -70,7 +70,7 @@ class GuiNetwork(CompleteNetwork):
         Borra un peer directamente usando su Fingerprint.
         Este método será sobreescrito en interface.py para actualizar la UI.
         """
-        # >>> NUEVO
+        # --- NUEVO: limpiar estado asociado ---
         self._clear_peer_state(fp)
 
         if fp in self.discovered:

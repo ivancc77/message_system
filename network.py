@@ -291,22 +291,24 @@ class CompleteNetwork:
         self.my_fingerprint = ""
         self.my_name = ""
     
+    # --- NUEVO ---
     def _clear_peer_state(self, fp: str):
         """
         Elimina toda la información de sesión para un peer:
-        - conexión en ConnectionManager
         - sesión Noise
-        (NO borra la cola de mensajes, para poder reenviarlos luego)
+        - conexión en ConnectionManager
+
+        NO borra la cola de mensajes para poder reenviarlos después.
         """
+        # Borrar sesión Noise
         try:
-            # Borrar sesión Noise
             if self.noise and hasattr(self.noise, "sessions"):
                 self.noise.sessions.pop(fp, None)
         except Exception:
             pass
 
+        # Borrar conexión
         try:
-            # Borrar conexión lógica
             cid = self.connection_manager.get_cid_for_peer(fp)
             if cid is not None:
                 self.connection_manager.connections.pop(cid, None)
@@ -314,6 +316,26 @@ class CompleteNetwork:
             self.connection_manager.peer_to_cid.pop(fp, None)
         except Exception:
             pass
+    
+
+    # --- NUEVO ---
+    async def _ensure_handshake_for_fp(self, fp: str):
+        """
+        Garantiza que hemos enviado un HANDSHAKE_INIT reciente
+        al peer 'fp' antes de mandar mensajes encolados.
+        """
+        peer_info = self.discovered.get(fp)
+        if not peer_info:
+            return
+
+        cid = self.connection_manager.get_cid_for_peer(fp)
+        if not cid:
+            cid = self.connection_manager.create_connection(fp, peer_info)
+
+        # Mandamos handshake (aunque ya hubiera otro antes, se renuevan claves)
+        await self._send_handshake(cid, peer_info)
+        # Pequeño margen para que llegue la respuesta
+        await asyncio.sleep(0.2)
 
     def _load_contacts(self):
         if os.path.exists(self.contacts_file):
@@ -411,27 +433,34 @@ class CompleteNetwork:
         fp_to_remove = None
         
         # Buscamos coincidencias (exactas o parciales)
-        for fp, info in list(self.discovered.items()):
+        for fp, info in self.discovered.items():
             stored_name = info.get('instance_name', '')
+            # Comparamos ignorando mayúsculas y posibles puntos finales
             if stored_name.strip('.') == instance_name.strip('.'):
                 fp_to_remove = fp
                 break
         
         if fp_to_remove:
-            # >>> NUEVO: limpiar estado de conexión / sesión
+            # --- NUEVO: limpiar estado de conexión / sesión ---
             self._clear_peer_state(fp_to_remove)
 
             # Borramos de la lista de ONLINE
             del self.discovered[fp_to_remove]
+            # get_peers() lo cogerá del JSON y le pondrá el (OFF).
             print(f"📉 Peer pasado a OFFLINE: {fp_to_remove[:8]}")
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
+    
     async def _flush_message_queue(self, fp):
         if fp in self.message_queue and self.message_queue[fp]:
             print(f"📬 Entregando mensajes en cola a {fp[:8]}...")
             peer_info = self.discovered.get(fp)
-            if not peer_info: return
-            
+            if not peer_info:
+                return
+
+            # --- NUEVO: nos aseguramos de hacer un handshake fresco ---
+            await self._ensure_handshake_for_fp(fp)
+
             # Copiar cola y vaciar original
             pending = self.message_queue[fp][:]
             self.message_queue[fp] = []
@@ -628,6 +657,7 @@ class CompleteNetwork:
         """
         peer_info = self.discovered.get(remote_fp)
         if peer_info:
+            # Obtenemos el instance_name para usar el método estándar de borrado
             instance_name = peer_info.get('instance_name')
             if instance_name:
                 # remove_discovered_peer ya se encarga de limpiar todo
@@ -636,6 +666,9 @@ class CompleteNetwork:
                 # Fallback por si no tiene instance_name
                 self._clear_peer_state(remote_fp)
                 del self.discovered[remote_fp]
+        else:
+            # No está en discovered, pero podemos tener sesiones/cids colgando
+            self._clear_peer_state(remote_fp)
     
     def _get_peer_fp_by_addr(self, addr):
         """Busca un usuario por su IP y puerto si el CID falla"""
