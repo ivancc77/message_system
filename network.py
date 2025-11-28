@@ -543,7 +543,7 @@ class CompleteNetwork:
                 # Si logramos identificar al usuario (por CID o por IP), lo desconectamos
                 if peer_fp:
                     # print(f"🔌 Desconexión confirmada para {peer_fp[:8]}")
-                    self.force_disconnect_peer(peer_fp)
+                    self._handle_disconnect(peer_fp) 
                 else:
                     # Si llega aquí, es un paquete fantasma (no conocemos ni la IP)
                     pass 
