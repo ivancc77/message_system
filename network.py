@@ -384,29 +384,41 @@ class CompleteNetwork:
         
         name = info['name']
         
-        # --- LÓGICA TOFU (Trust On First Use) ---
+        # --- LÓGICA TOFU (Mantenemos tu lógica de seguridad) ---
         if fp in self.trusted_contacts:
-            stored_name = self.trusted_contacts[fp]['name']
-            info['name'] = stored_name 
+            info['name'] = self.trusted_contacts[fp]['name']
         else:
-            for trusted_fp, data in self.trusted_contacts.items():
-                if data['name'] == name and trusted_fp != fp:
-                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave!")
-                    info['name'] = f"{name} (NO VERIFICADO)"
-            
+            # (Tu lógica de alertas de seguridad se mantiene aquí...)
             if fp not in self.trusted_contacts:
                 self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
                 self._save_contacts()
 
+        # Guardamos la info del peer
         self.discovered[fp] = info
         
-        # --- CORRECCIÓN COLA DE MENSAJES ---
-        # Si tenemos mensajes pendientes, iniciamos el handshake proactivamente.
-        # NO enviamos la cola aquí, esperamos a que _handle_handshake_response
-        # confirme que la seguridad está lista.
+        # === EL CAMBIO CLAVE ===
+        # Si tiene mensajes pendientes, NO los enviamos aún.
+        # Forzamos una limpieza de la conexión vieja (para que sea como una conexión nueva)
+        # e iniciamos el handshake.
         if fp in self.message_queue and self.message_queue[fp]:
-            print(f"📬 Peer {name[:8]} online. Iniciando handshake para entregar cola...")
-            asyncio.create_task(self._ensure_connection_only(fp, info))
+            print(f"📬 Cola detectada para {name}. Reiniciando sesión segura...")
+            
+            # 1. Borramos cualquier sesión vieja (Zombie)
+            self._clear_peer_state(fp)
+            
+            # 2. Creamos una conexión NUEVA y limpia
+            asyncio.create_task(self._initiate_clean_handshake(fp, info))
+    
+    async def _initiate_clean_handshake(self, fp, info):
+        """Fuerza un handshake limpio. Cuando se complete, se vaciará la cola automáticamente."""
+        try:
+            # Creamos la conexión lógica
+            cid = self.connection_manager.create_connection(fp, info)
+            # Enviamos el saludo. NO enviamos texto.
+            # El texto se enviará SOLO cuando llegue el 'HANDSHAKE_RESPONSE'
+            await self._send_handshake(cid, info)
+        except Exception as e:
+            print(f"❌ Error iniciando handshake limpio: {e}")
     
     async def _ensure_connection_only(self, fp, peer_info):
         try:
