@@ -596,40 +596,40 @@ class CompleteNetwork:
                 del self.discovered[remote_fp]
 
     async def broadcast_goodbye(self):
-        """
-        Envía un paquete de desconexión a todos los peers con los que tenemos sesión.
-        """
-        print("👋 Enviando señales de desconexión a peers...")
-        # Iteramos sobre una copia para evitar errores de concurrencia
+        print("👋 Enviando señales de desconexión (x3)...")
         active_peers = list(self.discovered.values())
         
         for peer in active_peers:
             fp = peer['fingerprint']
             cid = self.connection_manager.get_cid_for_peer(fp)
-            
-            if cid: # Solo si tenemos conexión establecida
+            if cid:
                 try:
-                    # Creamos paquete de desconexión (vacío o con payload simple)
-                    payload = msgpack.packb({'bye': True})
-                    # Lo encriptamos para seguridad (opcional en desconexión, pero recomendado)
-                    encrypted = self.noise.encrypt_message(payload, fp)
-                    
-                    # Usamos SID 0 o uno nuevo, no importa mucho para el bye
-                    pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
-                    
-                    self.udp_transport.sendto(pkt, (peer['ip'], peer['port']))
+                    # Enviar 3 veces para asegurar llegada (UDP no garantiza entrega)
+                    for _ in range(3):
+                        payload = msgpack.packb({'bye': True})
+                        encrypted = self.noise.encrypt_message(payload, fp)
+                        pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
+                        self.udp_transport.sendto(pkt, (peer['ip'], peer['port']))
                 except Exception as e:
-                    print(f"Error enviando goodbye a {fp[:8]}: {e}")
+                    print(f"Error bye a {fp[:8]}: {e}")
+    def force_disconnect_peer(self, fp):
+        """
+        Borra un peer directamente usando su Fingerprint.
+        Este método será sobreescrito en interface.py para actualizar la UI.
+        """
+        if fp in self.discovered:
+            del self.discovered[fp]
+            print(f"📉 Peer eliminado de la lista interna: {fp[:8]}")
         
     async def stop(self):
         # Primero enviamos el adiós
         await self.broadcast_goodbye()
         # Pequeña pausa para asegurar que los paquetes UDP salgan
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.2)
         
         if self.udp_transport: self.udp_transport.close()
         if self.zeroconf: await self.zeroconf.async_close()
-        
+
 class CompleteUDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, net): self.net = net
     def datagram_received(self, data, addr): self.net.handle_packet(data, addr)
