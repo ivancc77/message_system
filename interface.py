@@ -66,19 +66,16 @@ class GuiNetwork(CompleteNetwork):
         self.ui.update_ui()
 
     def force_disconnect_peer(self, fp):
-        # 1. Obtener nombre para el log
-        name = "Usuario"
-        if fp in self.discovered:
-            name = self.discovered[fp].get('name', fp[:8])
+        """
+        Borra un peer directamente usando su Fingerprint.
+        Este método será sobreescrito en interface.py para actualizar la UI.
+        """
+        # >>> NUEVO
+        self._clear_peer_state(fp)
 
-        # 2. Log del sistema (DEBE aparecer en azul en tu pantalla)
-        self.ui.log_system(f"🔌 {name} se ha desconectado.")
-        
-        # 3. Lógica interna de borrado
-        super().force_disconnect_peer(fp)
-        
-        # 4. Refrescar interfaz
-        self.ui.update_ui()
+        if fp in self.discovered:
+            del self.discovered[fp]
+            print(f"📉 Peer eliminado de la lista interna: {fp[:8]}")
         
     def _handle_text(self, payload, remote_fp):
         try:

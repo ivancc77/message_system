@@ -291,6 +291,30 @@ class CompleteNetwork:
         self.my_fingerprint = ""
         self.my_name = ""
     
+    def _clear_peer_state(self, fp: str):
+        """
+        Elimina toda la información de sesión para un peer:
+        - conexión en ConnectionManager
+        - sesión Noise
+        (NO borra la cola de mensajes, para poder reenviarlos luego)
+        """
+        try:
+            # Borrar sesión Noise
+            if self.noise and hasattr(self.noise, "sessions"):
+                self.noise.sessions.pop(fp, None)
+        except Exception:
+            pass
+
+        try:
+            # Borrar conexión lógica
+            cid = self.connection_manager.get_cid_for_peer(fp)
+            if cid is not None:
+                self.connection_manager.connections.pop(cid, None)
+                self.connection_manager.cid_to_peer.pop(cid, None)
+            self.connection_manager.peer_to_cid.pop(fp, None)
+        except Exception:
+            pass
+
     def _load_contacts(self):
         if os.path.exists(self.contacts_file):
             try:
@@ -387,19 +411,18 @@ class CompleteNetwork:
         fp_to_remove = None
         
         # Buscamos coincidencias (exactas o parciales)
-        for fp, info in self.discovered.items():
+        for fp, info in list(self.discovered.items()):
             stored_name = info.get('instance_name', '')
-            # Comparamos ignorando mayúsculas y posibles puntos finales
             if stored_name.strip('.') == instance_name.strip('.'):
                 fp_to_remove = fp
                 break
         
         if fp_to_remove:
+            # >>> NUEVO: limpiar estado de conexión / sesión
+            self._clear_peer_state(fp_to_remove)
+
             # Borramos de la lista de ONLINE
             del self.discovered[fp_to_remove]
-            # Si estamos usando interfaz gráfica, esto disparará el update_ui
-            # en el archivo interface.py, y como ya no está en 'discovered',
-            # get_peers() lo cogerá del JSON y le pondrá el (OFF).
             print(f"📉 Peer pasado a OFFLINE: {fp_to_remove[:8]}")
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
@@ -605,12 +628,13 @@ class CompleteNetwork:
         """
         peer_info = self.discovered.get(remote_fp)
         if peer_info:
-            # Obtenemos el instance_name para usar el método estándar de borrado
             instance_name = peer_info.get('instance_name')
             if instance_name:
+                # remove_discovered_peer ya se encarga de limpiar todo
                 self.remove_discovered_peer(instance_name)
             else:
-                # Fallback por si no tiene instance_name, lo borramos a mano
+                # Fallback por si no tiene instance_name
+                self._clear_peer_state(remote_fp)
                 del self.discovered[remote_fp]
     
     def _get_peer_fp_by_addr(self, addr):
