@@ -519,28 +519,34 @@ class CompleteNetwork:
 
     def handle_packet(self, data, addr):
         try:
-            # Intentamos parsear la cabecera
+            # 1. Parseo básico
             if len(data) < 12: return
             cid, sid, mtype, length = struct.unpack('!IIHH', data[:12])
             payload = data[12:12+length]
             
-            # Buscamos quién es
+            # 2. Intentamos identificar por CID (Session ID)
             peer_fp = self.connection_manager.get_peer_for_cid(cid)
             
-            # --- DEBUG PARA VER SI LLEGA EL ADIÓS ---
-            if mtype == 10: # 10 es DISCONNECT
-                print(f"🔌 DEBUG RED: Recibido paquete DISCONNECT (Tipo 10). CID={cid}, Peer={peer_fp}")
+            # 3. [CORRECCIÓN] Si es un ADIÓS y no encontramos el CID, buscamos por IP
+            if mtype == MessageType.DISCONNECT and not peer_fp:
+                # print(f"⚠️ Debug: CID {cid} desconocido, intentando recuperar por IP {addr}...")
+                peer_fp = self._get_peer_fp_by_addr(addr)
 
+            # 4. Procesar mensajes
             if mtype == MessageType.HANDSHAKE_INIT:
                 self._handle_handshake_init(cid, payload, addr)
             elif mtype == MessageType.HANDSHAKE_RESPONSE:
                 self._handle_handshake_response(payload, peer_fp)
             elif mtype == MessageType.TEXT_MESSAGE and peer_fp:
                 self._handle_text(payload, peer_fp)
-            elif mtype == MessageType.DISCONNECT and peer_fp:
-                # ¡AQUÍ ES DONDE ACTUAMOS!
-                print(f"🔌 Ejecutando desconexión forzada para {peer_fp[:8]}")
-                self.force_disconnect_peer(peer_fp)
+            elif mtype == MessageType.DISCONNECT:
+                # Si logramos identificar al usuario (por CID o por IP), lo desconectamos
+                if peer_fp:
+                    # print(f"🔌 Desconexión confirmada para {peer_fp[:8]}")
+                    self.force_disconnect_peer(peer_fp)
+                else:
+                    # Si llega aquí, es un paquete fantasma (no conocemos ni la IP)
+                    pass 
 
         except Exception as e:
             print(f"Packet Error: {e}")
@@ -606,6 +612,15 @@ class CompleteNetwork:
             else:
                 # Fallback por si no tiene instance_name, lo borramos a mano
                 del self.discovered[remote_fp]
+    
+    def _get_peer_fp_by_addr(self, addr):
+        """Busca un usuario por su IP y puerto si el CID falla"""
+        target_ip, target_port = addr
+        for fp, info in self.discovered.items():
+            # Comparamos IP (y opcionalmente puerto, aunque el puerto puede variar en NAT)
+            if info.get('ip') == target_ip:
+                 return fp
+        return None
 
     async def broadcast_goodbye(self):
         print("🛑 INICIANDO PROTOCOLO DE DESPEDIDA...")
@@ -647,20 +662,14 @@ class CompleteNetwork:
             print(f"📉 Peer eliminado de la lista interna: {fp[:8]}")
         
     async def stop(self):
-        # 1. Enviar despedida
+        # Enviar despedida
         await self.broadcast_goodbye()
         
-        # 2. ESPERA CRÍTICA: Damos 0.5 segundos al sistema operativo para vaciar el buffer UDP
-        print("⏳ Esperando vaciado de buffer de red...")
+        # [IMPORTANTE] Aumenta esto a 0.5 o 1.0 si sigue fallando
         await asyncio.sleep(0.5) 
         
-        # 3. Cerrar recursos
-        if self.udp_transport: 
-            self.udp_transport.close()
-            print("🔒 Transporte UDP cerrado.")
-        if self.zeroconf: 
-            await self.zeroconf.async_close()
-            print("🔒 mDNS cerrado.")
+        if self.udp_transport: self.udp_transport.close()
+        if self.zeroconf: await self.zeroconf.async_close()
 
 class CompleteUDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, net): self.net = net

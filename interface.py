@@ -82,20 +82,20 @@ class GuiNetwork(CompleteNetwork):
         self.ui.update_ui()
 
     def force_disconnect_peer(self, fp):
-        # 1. Log para confirmar que la interfaz se enteró
-        self.ui.log_system(f"📉 SEÑAL RECIBIDA: Desconectando peer {fp[:8]}")
+        # 1. Obtener nombre para el log
+        name = "Usuario"
+        if fp in self.discovered:
+            name = self.discovered[fp].get('name', fp[:8])
+
+        # 2. Log del sistema (DEBE aparecer en azul en tu pantalla)
+        self.ui.log_system(f"🔌 {name} se ha desconectado.")
         
-        # 2. Borrar de la lógica de red
+        # 3. Lógica interna de borrado
         super().force_disconnect_peer(fp)
         
-        # 3. ¡CRÍTICO! Forzar repintado de la pantalla
+        # 4. Refrescar interfaz
         self.ui.update_ui()
-        # Intentamos invalidar la app entera para asegurar refresco
-        try:
-            self.ui.app.invalidate()
-        except:
-            pass
-
+        
     def _handle_text(self, payload, remote_fp):
         try:
             decrypted = self.noise.decrypt_message(payload, remote_fp)
