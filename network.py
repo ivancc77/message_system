@@ -31,6 +31,7 @@ class MessageType:
     TEXT_MESSAGE = 3
     PING = 8
     PONG = 9
+    DISCONNECT = 10
 
 class NoiseIKProtocol:
     def __init__(self, static_private_key, dnie_manager):
@@ -527,6 +528,9 @@ class CompleteNetwork:
                 self._handle_handshake_response(payload, peer_fp)
             elif mtype == MessageType.TEXT_MESSAGE and peer_fp:
                 self._handle_text(payload, peer_fp)
+            elif mtype == MessageType.DISCONNECT and peer_fp:
+                print(f"🔌 Recibida señal de desconexión de {peer_fp[:8]}")
+                self._handle_disconnect(peer_fp)
         except Exception as e: print(f"Packet Error: {e}")
 
     def _handle_handshake_init(self, cid, payload, addr):
@@ -575,11 +579,57 @@ class CompleteNetwork:
             print(f"\n📨 MENSAJE de {self._get_clean_name(remote_fp)}: {data.get('text')}")
         except: 
             print("\n❌ Error desencriptando mensaje")
+    
+    def _handle_disconnect(self, remote_fp):
+        """
+        Se llama cuando recibimos un paquete explícito de desconexión.
+        Fuerza la eliminación del peer de la lista de descubiertos.
+        """
+        peer_info = self.discovered.get(remote_fp)
+        if peer_info:
+            # Obtenemos el instance_name para usar el método estándar de borrado
+            instance_name = peer_info.get('instance_name')
+            if instance_name:
+                self.remove_discovered_peer(instance_name)
+            else:
+                # Fallback por si no tiene instance_name, lo borramos a mano
+                del self.discovered[remote_fp]
+
+    async def broadcast_goodbye(self):
+        """
+        Envía un paquete de desconexión a todos los peers con los que tenemos sesión.
+        """
+        print("👋 Enviando señales de desconexión a peers...")
+        # Iteramos sobre una copia para evitar errores de concurrencia
+        active_peers = list(self.discovered.values())
+        
+        for peer in active_peers:
+            fp = peer['fingerprint']
+            cid = self.connection_manager.get_cid_for_peer(fp)
+            
+            if cid: # Solo si tenemos conexión establecida
+                try:
+                    # Creamos paquete de desconexión (vacío o con payload simple)
+                    payload = msgpack.packb({'bye': True})
+                    # Lo encriptamos para seguridad (opcional en desconexión, pero recomendado)
+                    encrypted = self.noise.encrypt_message(payload, fp)
+                    
+                    # Usamos SID 0 o uno nuevo, no importa mucho para el bye
+                    pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
+                    
+                    self.udp_transport.sendto(pkt, (peer['ip'], peer['port']))
+                except Exception as e:
+                    print(f"Error enviando goodbye a {fp[:8]}: {e}")
         
     async def stop(self):
+        # Primero enviamos el adiós
+        await self.broadcast_goodbye()
+        # Pequeña pausa para asegurar que los paquetes UDP salgan
+        await asyncio.sleep(0.1)
+        
         if self.udp_transport: self.udp_transport.close()
         if self.zeroconf: await self.zeroconf.async_close()
-
+        
 class CompleteUDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, net): self.net = net
     def datagram_received(self, data, addr): self.net.handle_packet(data, addr)
