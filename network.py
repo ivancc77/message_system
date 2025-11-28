@@ -31,7 +31,6 @@ class MessageType:
     TEXT_MESSAGE = 3
     PING = 8
     PONG = 9
-    DISCONNECT = 10
 
 class NoiseIKProtocol:
     def __init__(self, static_private_key, dnie_manager):
@@ -229,26 +228,13 @@ class SimpleListener(ServiceListener):
         self.network = network
     
     def update_service(self, zc, type_, name): pass
-    
-    def remove_service(self, zc, type_, name):
-        # AVISO DE DESCONEXIÓN
-        print(f"DEBUG: Recibido evento REMOVE para {name}")
-        # Limpiamos el nombre exactamente igual que al añadirlo
-        clean_name = name.replace("." + type_, "")
-        # Quitamos el punto final si ha quedado alguno (frecuente en mDNS)
-        if clean_name.endswith('.'):
-            clean_name = clean_name[:-1]
-            
-        self.network.remove_discovered_peer(clean_name)
-
+    def remove_service(self, zc, type_, name): pass
     def add_service(self, zc, type_, name):
         asyncio.create_task(self.resolve_async(zc, type_, name))
 
     def __call__(self, zeroconf, service_type, name, state_change):
         if state_change == ServiceStateChange.Added:
             self.add_service(zeroconf, service_type, name)
-        elif state_change == ServiceStateChange.Removed:
-            self.remove_service(zeroconf, service_type, name)
     
     async def resolve_async(self, zc, type_, name):
         try:
@@ -256,10 +242,7 @@ class SimpleListener(ServiceListener):
             if info:
                 props = {k.decode('utf-8', 'ignore'): v.decode('utf-8', 'ignore') 
                          for k, v in info.properties.items()}
-                
                 clean_name = name.replace("." + type_, "")
-                if clean_name.endswith('.'): clean_name = clean_name[:-1]
-
                 peer_info = {
                     'name': props.get('real_name', clean_name),
                     'fingerprint': props.get('fingerprint', ''),
@@ -383,25 +366,6 @@ class CompleteNetwork:
         if is_new or fp in self.message_queue:
             asyncio.create_task(self._flush_message_queue(fp))
 
-    def remove_discovered_peer(self, instance_name):
-        fp_to_remove = None
-        
-        # Buscamos coincidencias (exactas o parciales)
-        for fp, info in self.discovered.items():
-            stored_name = info.get('instance_name', '')
-            # Comparamos ignorando mayúsculas y posibles puntos finales
-            if stored_name.strip('.') == instance_name.strip('.'):
-                fp_to_remove = fp
-                break
-        
-        if fp_to_remove:
-            # Borramos de la lista de ONLINE
-            del self.discovered[fp_to_remove]
-            # Si estamos usando interfaz gráfica, esto disparará el update_ui
-            # en el archivo interface.py, y como ya no está en 'discovered',
-            # get_peers() lo cogerá del JSON y le pondrá el (OFF).
-            print(f"📉 Peer pasado a OFFLINE: {fp_to_remove[:8]}")
-
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
     async def _flush_message_queue(self, fp):
         if fp in self.message_queue and self.message_queue[fp]:
@@ -446,70 +410,41 @@ class CompleteNetwork:
         return raw_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
 
     async def send_message(self, target_name_or_fp, text):
-        # 1. Intentar encontrar al usuario en la lista de ONLINE (discovered)
+        # Resolver fingerprint si nos dan nombre
         peer_info = self.discovered.get(target_name_or_fp)
         target_fp = target_name_or_fp
         
-        # Si nos han pasado un nombre en vez de un fingerprint, lo buscamos
         if not peer_info:
              target_lower = target_name_or_fp.lower()
-             for fp, p in self.discovered.items():
-                 # Buscamos por nombre o por nombre de instancia
-                 p_name = p.get('name', '').lower()
-                 p_inst = p.get('instance_name', '').lower()
-                 if target_lower in p_name or target_lower in p_inst:
+             for p in self.discovered.values():
+                 if target_lower in p['name'].lower() or target_lower in p.get('instance_name','').lower():
                      peer_info = p
-                     target_fp = fp
+                     target_fp = p['fingerprint']
                      break
         
-        # Si no lo encontramos en ONLINE, miramos si es un contacto de la AGENDA
-        if not peer_info and hasattr(self, 'trusted_contacts'):
-             if target_fp in self.trusted_contacts:
-                 # Es un contacto conocido, pero está OFFLINE
-                 pass # peer_info sigue siendo None, lo manejaremos abajo
-             else:
-                 # Quizás el user pasó un nombre de la agenda
-                 for fp, info in self.trusted_contacts.items():
-                     if info['name'].lower() == target_name_or_fp.lower():
-                         target_fp = fp
-                         break
+        # [CORRECCIÓN] Lógica Offline / Queueing
+        #if not peer_info:
+         #   print(f"💤 Usuario offline. Mensaje encolado para {target_fp[:8]}")
+          #  if target_fp not in self.message_queue:
+           #     self.message_queue[target_fp] = []
+            #self.message_queue[target_fp].append(text)
+            #return True # Pretendemos que se envió (se entregará luego)
 
-        # 2. LOGICA OFFLINE / POSTCARDS
-        # Si peer_info es None, o la IP es "Offline" (del apaño anterior), ENCOLAMOS
-        is_offline = (peer_info is None) or (peer_info.get('ip') == 'Offline')
-
-        if is_offline:
-            print(f"💤 Usuario offline. Mensaje encolado para {target_fp[:8]}")
+        # Proceso normal de envío
+        cid = self.connection_manager.get_cid_for_peer(target_fp)
+        if not cid:
+            cid = self.connection_manager.create_connection(target_fp, peer_info)
+            await self._send_handshake(cid, peer_info)
+            # Pequeña espera para handshake
+            await asyncio.sleep(0.5)
             
-            # Guardamos en la cola de memoria
-            if target_fp not in self.message_queue:
-                self.message_queue[target_fp] = []
-            
-            self.message_queue[target_fp].append(text)
-            
-            # Devolvemos True para que la Interfaz Gráfica muestre el mensaje
-            # como si se hubiera enviado (aunque se entregará luego)
-            return True 
-
-        # 3. LOGICA ONLINE (Solo llegamos aquí si tenemos IP y Puerto)
-        try:
-            cid = self.connection_manager.get_cid_for_peer(target_fp)
-            if not cid:
-                cid = self.connection_manager.create_connection(target_fp, peer_info)
-                await self._send_handshake(cid, peer_info)
-                # Pequeña espera para handshake
-                await asyncio.sleep(0.2)
-                
-            sid = self.connection_manager.create_stream(cid, 'text')
-            msg_bytes = msgpack.packb({'text': text, 'ts': time.time()})
-            encrypted = self.noise.encrypt_message(msg_bytes, target_fp)
-            
-            pkt = self.connection_manager.create_packet(cid, sid, MessageType.TEXT_MESSAGE, encrypted)
-            self.udp_transport.sendto(pkt, (peer_info['ip'], peer_info['port']))
-            return True
-        except Exception as e:
-            print(f"❌ Error enviando UDP: {e}")
-            return False
+        sid = self.connection_manager.create_stream(cid, 'text')
+        msg_bytes = msgpack.packb({'text': text, 'ts': time.time()})
+        encrypted = self.noise.encrypt_message(msg_bytes, target_fp)
+        
+        pkt = self.connection_manager.create_packet(cid, sid, MessageType.TEXT_MESSAGE, encrypted)
+        self.udp_transport.sendto(pkt, (peer_info['ip'], peer_info['port']))
+        return True
 
     async def _send_handshake(self, cid, peer_info):
         data, session = self.noise.initiate_handshake(None, peer_info['fingerprint'])
@@ -528,9 +463,6 @@ class CompleteNetwork:
                 self._handle_handshake_response(payload, peer_fp)
             elif mtype == MessageType.TEXT_MESSAGE and peer_fp:
                 self._handle_text(payload, peer_fp)
-            elif mtype == MessageType.DISCONNECT and peer_fp:
-                print(f"🔌 Recibida señal de desconexión de {peer_fp[:8]}")
-                self._handle_disconnect(peer_fp)
         except Exception as e: print(f"Packet Error: {e}")
 
     def _handle_handshake_init(self, cid, payload, addr):
@@ -579,57 +511,11 @@ class CompleteNetwork:
             print(f"\n📨 MENSAJE de {self._get_clean_name(remote_fp)}: {data.get('text')}")
         except: 
             print("\n❌ Error desencriptando mensaje")
-    
-    def _handle_disconnect(self, remote_fp):
-        """
-        Se llama cuando recibimos un paquete explícito de desconexión.
-        Fuerza la eliminación del peer de la lista de descubiertos.
-        """
-        peer_info = self.discovered.get(remote_fp)
-        if peer_info:
-            # Obtenemos el instance_name para usar el método estándar de borrado
-            instance_name = peer_info.get('instance_name')
-            if instance_name:
-                self.remove_discovered_peer(instance_name)
-            else:
-                # Fallback por si no tiene instance_name, lo borramos a mano
-                del self.discovered[remote_fp]
-
-    async def broadcast_goodbye(self):
-        """
-        Envía un paquete de desconexión a todos los peers con los que tenemos sesión.
-        """
-        print("👋 Enviando señales de desconexión a peers...")
-        # Iteramos sobre una copia para evitar errores de concurrencia
-        active_peers = list(self.discovered.values())
-        
-        for peer in active_peers:
-            fp = peer['fingerprint']
-            cid = self.connection_manager.get_cid_for_peer(fp)
-            
-            if cid: # Solo si tenemos conexión establecida
-                try:
-                    # Creamos paquete de desconexión (vacío o con payload simple)
-                    payload = msgpack.packb({'bye': True})
-                    # Lo encriptamos para seguridad (opcional en desconexión, pero recomendado)
-                    encrypted = self.noise.encrypt_message(payload, fp)
-                    
-                    # Usamos SID 0 o uno nuevo, no importa mucho para el bye
-                    pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
-                    
-                    self.udp_transport.sendto(pkt, (peer['ip'], peer['port']))
-                except Exception as e:
-                    print(f"Error enviando goodbye a {fp[:8]}: {e}")
         
     async def stop(self):
-        # Primero enviamos el adiós
-        await self.broadcast_goodbye()
-        # Pequeña pausa para asegurar que los paquetes UDP salgan
-        await asyncio.sleep(0.1)
-        
         if self.udp_transport: self.udp_transport.close()
         if self.zeroconf: await self.zeroconf.async_close()
-        
+
 class CompleteUDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, net): self.net = net
     def datagram_received(self, data, addr): self.net.handle_packet(data, addr)
