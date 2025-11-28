@@ -228,13 +228,23 @@ class SimpleListener(ServiceListener):
         self.network = network
     
     def update_service(self, zc, type_, name): pass
-    def remove_service(self, zc, type_, name): pass
+    
+    def remove_service(self, zc, type_, name):
+        # [NUEVO] Detectamos cuando un servicio desaparece
+        # Ejecutamos en el bucle principal para evitar bloqueos
+        asyncio.get_event_loop().call_soon_threadsafe(
+            self.network.remove_discovered_peer, name
+        )
+
     def add_service(self, zc, type_, name):
         asyncio.create_task(self.resolve_async(zc, type_, name))
 
     def __call__(self, zeroconf, service_type, name, state_change):
         if state_change == ServiceStateChange.Added:
             self.add_service(zeroconf, service_type, name)
+        # [NUEVO] Manejamos el evento de eliminación explícitamente
+        elif state_change == ServiceStateChange.Removed:
+            self.remove_service(zeroconf, service_type, name)
     
     async def resolve_async(self, zc, type_, name):
         try:
@@ -540,6 +550,25 @@ class CompleteNetwork:
             print(f"\n📨 MENSAJE de {self._get_clean_name(remote_fp)}: {data.get('text')}")
         except: 
             print("\n❌ Error desencriptando mensaje")
+    
+    def remove_discovered_peer(self, service_name):
+        # El nombre viene como "User-XYZ._dni...local.", limpiamos para buscar
+        # Nota: service_name suele ser el nombre completo del registro mDNS
+        
+        fingerprint_to_remove = None
+        
+        for fp, info in self.discovered.items():
+            # Comparamos si el nombre del servicio eliminado coincide con el guardado
+            # info['instance_name'] es lo que guardamos sin el sufijo ._udp.local.
+            if info['instance_name'] in service_name:
+                fingerprint_to_remove = fp
+                break
+        
+        if fingerprint_to_remove:
+            print(f"📉 Peer desconectado detectado: {fingerprint_to_remove[:8]}")
+            del self.discovered[fingerprint_to_remove]
+            # Al borrarlo de 'discovered', si está en 'contacts.json',
+            # get_peers() lo mostrará automáticamente como OFF.
         
     async def stop(self):
         if self.udp_transport: self.udp_transport.close()
