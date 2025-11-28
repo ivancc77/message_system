@@ -630,28 +630,36 @@ class CompleteNetwork:
         
         for peer in active_peers:
             fp = peer['fingerprint']
-            cid = self.connection_manager.get_cid_for_peer(fp)
-            
-            if cid:
-                peers_count += 1
-                print(f"   -> Enviando ADIÓS a {peer.get('name', 'Peer')[:10]} ({peer['ip']})...")
-                try:
-                    # Payload simple
-                    payload = msgpack.packb({'bye': True})
-                    # Encriptamos (si falla la encriptación, enviamos sin encriptar como último recurso?)
-                    # Mejor mantenemos encriptación para no romper el protocolo Noise
-                    encrypted = self.noise.encrypt_message(payload, fp)
-                    
-                    # ENVIAMOS 3 VECES (Redundancia UDP)
-                    pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
-                    for i in range(3):
-                        self.udp_transport.sendto(pkt, (peer['ip'], peer['port']))
-                except Exception as e:
-                    print(f"   ❌ Error enviando a {fp[:8]}: {e}")
-            else:
-                print(f"   ⚠️ No hay sesión activa (CID) con {peer.get('name')}, saltando despedida.")
+            ip = peer.get('ip')
+            port = peer.get('port')
+            # Si por cualquier motivo falta IP o puerto, saltamos
+            if not ip or not port:
+                continue
+
+            peers_count += 1
+            print(f"   -> Enviando ADIÓS a {peer.get('name', 'Peer')[:10]} ({ip})...")
+
+            try:
+                # Payload simple
+                payload = msgpack.packb({'bye': True})
+
+                # Si hay sesión Noise usamos cifrado; si no, encrypt_message devolverá el payload tal cual
+                encrypted = self.noise.encrypt_message(payload, fp) if self.noise else payload
+
+                # Si no hay CID, usamos 0 (en el receptor se resuelve por IP con _get_peer_fp_by_addr)
+                cid = self.connection_manager.get_cid_for_peer(fp) or 0
+
+                # ENVIAMOS 3 VECES (Redundancia UDP)
+                pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
+                for _ in range(3):
+                    self.udp_transport.sendto(pkt, (ip, port))
+
+            except Exception as e:
+                print(f"   ❌ Error enviando a {fp[:8]}: {e}")
 
         print(f"🛑 Despedida enviada a {peers_count} usuarios.")
+
+
     def force_disconnect_peer(self, fp):
         """
         Borra un peer directamente usando su Fingerprint.
