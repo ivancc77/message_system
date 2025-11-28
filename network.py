@@ -291,30 +291,6 @@ class CompleteNetwork:
         self.my_fingerprint = ""
         self.my_name = ""
     
-    def _clear_peer_state(self, fp: str):
-        """
-        Elimina toda la información de sesión para un peer:
-        - conexión en ConnectionManager
-        - sesión Noise
-        (NO borra la cola de mensajes, para poder reenviarlos luego)
-        """
-        try:
-            # Borrar sesión Noise
-            if self.noise and hasattr(self.noise, "sessions"):
-                self.noise.sessions.pop(fp, None)
-        except Exception:
-            pass
-
-        try:
-            # Borrar conexión lógica
-            cid = self.connection_manager.get_cid_for_peer(fp)
-            if cid is not None:
-                self.connection_manager.connections.pop(cid, None)
-                self.connection_manager.cid_to_peer.pop(cid, None)
-            self.connection_manager.peer_to_cid.pop(fp, None)
-        except Exception:
-            pass
-
     def _load_contacts(self):
         if os.path.exists(self.contacts_file):
             try:
@@ -386,53 +362,44 @@ class CompleteNetwork:
         
         # --- LÓGICA TOFU (Trust On First Use) ---
         if fp in self.trusted_contacts:
+            # Ya lo conocemos, actualizamos nombre si ha cambiado (opcional)
             stored_name = self.trusted_contacts[fp]['name']
-            info['name'] = stored_name 
+            info['name'] = stored_name # Mantenemos el nombre que nosotros confiamos
         else:
+            # ¿Es un nombre que ya conocemos pero con OTRA clave? (ALERTA DE SEGURIDAD)
             for trusted_fp, data in self.trusted_contacts.items():
                 if data['name'] == name and trusted_fp != fp:
-                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave!")
+                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave! Podría ser un ataque.")
                     info['name'] = f"{name} (NO VERIFICADO)"
             
+            # Si es totalmente nuevo, lo guardamos (Trust First Use)
             if fp not in self.trusted_contacts:
                 self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
                 self._save_contacts()
-
+        # [CORRECCIÓN] Si el peer reaparece, intentamos enviar cola
+        is_new = fp not in self.discovered
         self.discovered[fp] = info
         
-        # --- CORRECCIÓN COLA DE MENSAJES ---
-        # Si tenemos mensajes pendientes, iniciamos el handshake proactivamente.
-        # NO enviamos la cola aquí, esperamos a que _handle_handshake_response
-        # confirme que la seguridad está lista.
-        if fp in self.message_queue and self.message_queue[fp]:
-            print(f"📬 Peer {name[:8]} online. Iniciando handshake para entregar cola...")
-            asyncio.create_task(self._ensure_connection_only(fp, info))
-    
-    async def _ensure_connection_only(self, fp, peer_info):
-        try:
-            cid = self.connection_manager.get_cid_for_peer(fp)
-            if not cid:
-                cid = self.connection_manager.create_connection(fp, peer_info)
-                await self._send_handshake(cid, peer_info)
-        except Exception as e:
-            print(f"❌ Error iniciando conexión diferida: {e}")
+        if is_new or fp in self.message_queue:
+            asyncio.create_task(self._flush_message_queue(fp))
 
     def remove_discovered_peer(self, instance_name):
         fp_to_remove = None
         
         # Buscamos coincidencias (exactas o parciales)
-        for fp, info in list(self.discovered.items()):
+        for fp, info in self.discovered.items():
             stored_name = info.get('instance_name', '')
+            # Comparamos ignorando mayúsculas y posibles puntos finales
             if stored_name.strip('.') == instance_name.strip('.'):
                 fp_to_remove = fp
                 break
         
         if fp_to_remove:
-            # >>> NUEVO: limpiar estado de conexión / sesión
-            self._clear_peer_state(fp_to_remove)
-
             # Borramos de la lista de ONLINE
             del self.discovered[fp_to_remove]
+            # Si estamos usando interfaz gráfica, esto disparará el update_ui
+            # en el archivo interface.py, y como ya no está en 'discovered',
+            # get_peers() lo cogerá del JSON y le pondrá el (OFF).
             print(f"📉 Peer pasado a OFFLINE: {fp_to_remove[:8]}")
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
@@ -638,13 +605,12 @@ class CompleteNetwork:
         """
         peer_info = self.discovered.get(remote_fp)
         if peer_info:
+            # Obtenemos el instance_name para usar el método estándar de borrado
             instance_name = peer_info.get('instance_name')
             if instance_name:
-                # remove_discovered_peer ya se encarga de limpiar todo
                 self.remove_discovered_peer(instance_name)
             else:
-                # Fallback por si no tiene instance_name
-                self._clear_peer_state(remote_fp)
+                # Fallback por si no tiene instance_name, lo borramos a mano
                 del self.discovered[remote_fp]
     
     def _get_peer_fp_by_addr(self, addr):
