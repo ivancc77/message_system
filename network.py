@@ -351,6 +351,10 @@ class CompleteNetwork:
         fp = info['fingerprint']
         if fp == self.my_fingerprint: return
         
+        # Si mDNS nos avisa de que el usuario está aquí, asumimos que puede 
+        # haberse reiniciado. Borramos su sesión anterior para forzar un nuevo 
+        # Handshake la próxima vez que le hablemos.
+        self._clear_peer_state(fp)
         name = info['name']
         
         # --- LÓGICA TOFU (Trust On First Use) ---
@@ -569,6 +573,22 @@ class CompleteNetwork:
             del self.discovered[fingerprint_to_remove]
             # Al borrarlo de 'discovered', si está en 'contacts.json',
             # get_peers() lo mostrará automáticamente como OFF.
+
+    def _clear_peer_state(self, fp):
+        # 1. Borrar sesión criptográfica de Noise
+        if fp in self.noise.sessions:
+            del self.noise.sessions[fp]
+        
+        # 2. Borrar conexión lógica (CID) del ConnectionManager
+        # Esto es vital para que send_message sepa que debe hacer Handshake de nuevo
+        cid = self.connection_manager.get_cid_for_peer(fp)
+        if cid:
+            if cid in self.connection_manager.connections:
+                del self.connection_manager.connections[cid]
+            if cid in self.connection_manager.cid_to_peer:
+                del self.connection_manager.cid_to_peer[cid]
+            if fp in self.connection_manager.peer_to_cid:
+                del self.connection_manager.peer_to_cid[fp]
         
     async def stop(self):
         if self.udp_transport: self.udp_transport.close()
