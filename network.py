@@ -384,30 +384,40 @@ class CompleteNetwork:
         
         name = info['name']
         
-        # --- LÓGICA TOFU (Mantenemos tu lógica de seguridad) ---
+        # --- Lógica de Contactos (Se mantiene igual) ---
         if fp in self.trusted_contacts:
             info['name'] = self.trusted_contacts[fp]['name']
         else:
-            # (Tu lógica de alertas de seguridad se mantiene aquí...)
             if fp not in self.trusted_contacts:
                 self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
                 self._save_contacts()
 
-        # Guardamos la info del peer
+        # 1. ACTUALIZAMOS LA INFO (IP/Puerto nuevos)
         self.discovered[fp] = info
         
-        # === EL CAMBIO CLAVE ===
-        # Si tiene mensajes pendientes, NO los enviamos aún.
-        # Forzamos una limpieza de la conexión vieja (para que sea como una conexión nueva)
-        # e iniciamos el handshake.
+        # 2. GESTIÓN DE LA COLA
+        # Si tenemos mensajes pendientes para él...
         if fp in self.message_queue and self.message_queue[fp]:
-            print(f"📬 Cola detectada para {name}. Reiniciando sesión segura...")
+            print(f"📬 Reencontrado a {name}. Borrando sesión vieja y reconectando...")
             
-            # 1. Borramos cualquier sesión vieja (Zombie)
+            # [CLAVE] Borramos la sesión anterior COMPLETAMENTE.
+            # Esto obliga a generar un nuevo CID (ID de conexión) que el receptor sí aceptará.
             self._clear_peer_state(fp)
             
-            # 2. Creamos una conexión NUEVA y limpia
-            asyncio.create_task(self._initiate_clean_handshake(fp, info))
+            # Iniciamos el saludo (Handshake). 
+            # NOTA: No enviamos los mensajes aquí. Se enviarán solos cuando 
+            # llegue la respuesta del handshake (_handle_handshake_response).
+            asyncio.create_task(self._initiate_handshake_only(fp, info))
+
+    async def _initiate_handshake_only(self, fp, info):
+        """Crea una conexión nueva y manda SOLO el handshake."""
+        try:
+            # Al haber hecho _clear_peer_state antes, esto creará un CID nuevo (ej. 1)
+            # que coincidirá con lo que espera el receptor.
+            cid = self.connection_manager.create_connection(fp, info)
+            await self._send_handshake(cid, info)
+        except Exception as e:
+            print(f"❌ Error reconectando: {e}")
     
     async def _initiate_clean_handshake(self, fp, info):
         """Fuerza un handshake limpio. Cuando se complete, se vaciará la cola automáticamente."""
@@ -449,6 +459,7 @@ class CompleteNetwork:
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
     async def _flush_message_queue(self, fp):
+        await asyncio.sleep(0.5)
         if fp in self.message_queue and self.message_queue[fp]:
             print(f"📬 Entregando mensajes en cola a {fp[:8]}...")
             peer_info = self.discovered.get(fp)
