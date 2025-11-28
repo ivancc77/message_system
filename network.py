@@ -519,9 +519,18 @@ class CompleteNetwork:
 
     def handle_packet(self, data, addr):
         try:
-            cid, sid, mtype, payload = self.connection_manager.parse_packet(data)
+            # Intentamos parsear la cabecera
+            if len(data) < 12: return
+            cid, sid, mtype, length = struct.unpack('!IIHH', data[:12])
+            payload = data[12:12+length]
+            
+            # Buscamos quién es
             peer_fp = self.connection_manager.get_peer_for_cid(cid)
             
+            # --- DEBUG PARA VER SI LLEGA EL ADIÓS ---
+            if mtype == 10: # 10 es DISCONNECT
+                print(f"🔌 DEBUG RED: Recibido paquete DISCONNECT (Tipo 10). CID={cid}, Peer={peer_fp}")
+
             if mtype == MessageType.HANDSHAKE_INIT:
                 self._handle_handshake_init(cid, payload, addr)
             elif mtype == MessageType.HANDSHAKE_RESPONSE:
@@ -529,9 +538,12 @@ class CompleteNetwork:
             elif mtype == MessageType.TEXT_MESSAGE and peer_fp:
                 self._handle_text(payload, peer_fp)
             elif mtype == MessageType.DISCONNECT and peer_fp:
-                print(f"🔌 Recibida señal de desconexión de {peer_fp[:8]}")
-                self._handle_disconnect(peer_fp)
-        except Exception as e: print(f"Packet Error: {e}")
+                # ¡AQUÍ ES DONDE ACTUAMOS!
+                print(f"🔌 Ejecutando desconexión forzada para {peer_fp[:8]}")
+                self.force_disconnect_peer(peer_fp)
+
+        except Exception as e:
+            print(f"Packet Error: {e}")
 
     def _handle_handshake_init(self, cid, payload, addr):
         try:
@@ -596,22 +608,35 @@ class CompleteNetwork:
                 del self.discovered[remote_fp]
 
     async def broadcast_goodbye(self):
-        print("👋 Enviando señales de desconexión (x3)...")
+        print("🛑 INICIANDO PROTOCOLO DE DESPEDIDA...")
+        peers_count = 0
+        # Hacemos una copia de la lista para evitar errores mientras iteramos
         active_peers = list(self.discovered.values())
         
         for peer in active_peers:
             fp = peer['fingerprint']
             cid = self.connection_manager.get_cid_for_peer(fp)
+            
             if cid:
+                peers_count += 1
+                print(f"   -> Enviando ADIÓS a {peer.get('name', 'Peer')[:10]} ({peer['ip']})...")
                 try:
-                    # Enviar 3 veces para asegurar llegada (UDP no garantiza entrega)
-                    for _ in range(3):
-                        payload = msgpack.packb({'bye': True})
-                        encrypted = self.noise.encrypt_message(payload, fp)
-                        pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
+                    # Payload simple
+                    payload = msgpack.packb({'bye': True})
+                    # Encriptamos (si falla la encriptación, enviamos sin encriptar como último recurso?)
+                    # Mejor mantenemos encriptación para no romper el protocolo Noise
+                    encrypted = self.noise.encrypt_message(payload, fp)
+                    
+                    # ENVIAMOS 3 VECES (Redundancia UDP)
+                    pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
+                    for i in range(3):
                         self.udp_transport.sendto(pkt, (peer['ip'], peer['port']))
                 except Exception as e:
-                    print(f"Error bye a {fp[:8]}: {e}")
+                    print(f"   ❌ Error enviando a {fp[:8]}: {e}")
+            else:
+                print(f"   ⚠️ No hay sesión activa (CID) con {peer.get('name')}, saltando despedida.")
+
+        print(f"🛑 Despedida enviada a {peers_count} usuarios.")
     def force_disconnect_peer(self, fp):
         """
         Borra un peer directamente usando su Fingerprint.
@@ -622,13 +647,20 @@ class CompleteNetwork:
             print(f"📉 Peer eliminado de la lista interna: {fp[:8]}")
         
     async def stop(self):
-        # Primero enviamos el adiós
+        # 1. Enviar despedida
         await self.broadcast_goodbye()
-        # Pequeña pausa para asegurar que los paquetes UDP salgan
-        await asyncio.sleep(0.2)
         
-        if self.udp_transport: self.udp_transport.close()
-        if self.zeroconf: await self.zeroconf.async_close()
+        # 2. ESPERA CRÍTICA: Damos 0.5 segundos al sistema operativo para vaciar el buffer UDP
+        print("⏳ Esperando vaciado de buffer de red...")
+        await asyncio.sleep(0.5) 
+        
+        # 3. Cerrar recursos
+        if self.udp_transport: 
+            self.udp_transport.close()
+            print("🔒 Transporte UDP cerrado.")
+        if self.zeroconf: 
+            await self.zeroconf.async_close()
+            print("🔒 mDNS cerrado.")
 
 class CompleteUDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, net): self.net = net
