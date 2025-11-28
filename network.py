@@ -408,26 +408,36 @@ class CompleteNetwork:
         
         # --- LÓGICA TOFU (Trust On First Use) ---
         if fp in self.trusted_contacts:
-            # Ya lo conocemos, actualizamos nombre si ha cambiado (opcional)
             stored_name = self.trusted_contacts[fp]['name']
-            info['name'] = stored_name # Mantenemos el nombre que nosotros confiamos
+            info['name'] = stored_name 
         else:
-            # ¿Es un nombre que ya conocemos pero con OTRA clave? (ALERTA DE SEGURIDAD)
             for trusted_fp, data in self.trusted_contacts.items():
                 if data['name'] == name and trusted_fp != fp:
-                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave! Podría ser un ataque.")
+                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave!")
                     info['name'] = f"{name} (NO VERIFICADO)"
             
-            # Si es totalmente nuevo, lo guardamos (Trust First Use)
             if fp not in self.trusted_contacts:
                 self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
                 self._save_contacts()
-        # [CORRECCIÓN] Si el peer reaparece, intentamos enviar cola
-        is_new = fp not in self.discovered
+
         self.discovered[fp] = info
         
-        if is_new or fp in self.message_queue:
-            asyncio.create_task(self._flush_message_queue(fp))
+        # --- CORRECCIÓN COLA DE MENSAJES ---
+        # Si tenemos mensajes pendientes, iniciamos el handshake proactivamente.
+        # NO enviamos la cola aquí, esperamos a que _handle_handshake_response
+        # confirme que la seguridad está lista.
+        if fp in self.message_queue and self.message_queue[fp]:
+            print(f"📬 Peer {name[:8]} online. Iniciando handshake para entregar cola...")
+            asyncio.create_task(self._ensure_connection_only(fp, info))
+    
+    async def _ensure_connection_only(self, fp, peer_info):
+        try:
+            cid = self.connection_manager.get_cid_for_peer(fp)
+            if not cid:
+                cid = self.connection_manager.create_connection(fp, peer_info)
+                await self._send_handshake(cid, peer_info)
+        except Exception as e:
+            print(f"❌ Error iniciando conexión diferida: {e}")
 
     def remove_discovered_peer(self, instance_name):
         fp_to_remove = None
