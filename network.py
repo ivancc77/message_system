@@ -282,7 +282,6 @@ class CompleteNetwork:
         
         # [CORRECCIÓN] Cola de mensajes para entrega diferida (Postcards)
         self.message_queue = {} 
-        self.handshake_in_progress = {}
 
         self.contacts_file = "contacts.json"
         self.trusted_contacts = self._load_contacts()
@@ -385,59 +384,29 @@ class CompleteNetwork:
         
         name = info['name']
         
-        # --- Lógica TOFU (Mantenemos tu seguridad) ---
+        # --- LÓGICA TOFU (Trust On First Use) ---
         if fp in self.trusted_contacts:
-            info['name'] = self.trusted_contacts[fp]['name']
+            stored_name = self.trusted_contacts[fp]['name']
+            info['name'] = stored_name 
         else:
+            for trusted_fp, data in self.trusted_contacts.items():
+                if data['name'] == name and trusted_fp != fp:
+                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave!")
+                    info['name'] = f"{name} (NO VERIFICADO)"
+            
             if fp not in self.trusted_contacts:
                 self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
                 self._save_contacts()
 
         self.discovered[fp] = info
         
-        # --- LÓGICA DE RECONEXIÓN SEGURA ---
-        # Si hay cola de mensajes, hay que reconectar, PERO con cuidado.
+        # --- CORRECCIÓN COLA DE MENSAJES ---
+        # Si tenemos mensajes pendientes, iniciamos el handshake proactivamente.
+        # NO enviamos la cola aquí, esperamos a que _handle_handshake_response
+        # confirme que la seguridad está lista.
         if fp in self.message_queue and self.message_queue[fp]:
-            
-            # [NUEVO] EL FRENO: Si ya iniciamos un handshake hace poco, NO hacemos nada.
-            # Esto evita que el mDNS repetido rompa la encriptación a medio proceso.
-            last_attempt = self.handshake_in_progress.get(fp, 0)
-            if time.time() - last_attempt < 10:
-                print(f"⏳ Ignorando señal repetida de {name} (Handshake en proceso...)")
-                return
-
-            print(f"📬 Reencontrado a {name}. Borrando sesión vieja y reconectando...")
-            
-            # Marcamos que estamos trabajando en este peer
-            self.handshake_in_progress[fp] = time.time()
-
-            # 1. Borrado total de la sesión anterior (Clean Slate)
-            self._clear_peer_state(fp)
-            
-            # 2. Iniciamos handshake. Los mensajes saldrán SOLOS cuando
-            # se reciba la respuesta en _handle_handshake_response
-            asyncio.create_task(self._initiate_handshake_only(fp, info))
-
-    async def _initiate_handshake_only(self, fp, info):
-        """Crea una conexión nueva y manda SOLO el handshake."""
-        try:
-            # Al haber hecho _clear_peer_state antes, esto creará un CID nuevo (ej. 1)
-            # que coincidirá con lo que espera el receptor.
-            cid = self.connection_manager.create_connection(fp, info)
-            await self._send_handshake(cid, info)
-        except Exception as e:
-            print(f"❌ Error reconectando: {e}")
-    
-    async def _initiate_clean_handshake(self, fp, info):
-        """Fuerza un handshake limpio. Cuando se complete, se vaciará la cola automáticamente."""
-        try:
-            # Creamos la conexión lógica
-            cid = self.connection_manager.create_connection(fp, info)
-            # Enviamos el saludo. NO enviamos texto.
-            # El texto se enviará SOLO cuando llegue el 'HANDSHAKE_RESPONSE'
-            await self._send_handshake(cid, info)
-        except Exception as e:
-            print(f"❌ Error iniciando handshake limpio: {e}")
+            print(f"📬 Peer {name[:8]} online. Iniciando handshake para entregar cola...")
+            asyncio.create_task(self._ensure_connection_only(fp, info))
     
     async def _ensure_connection_only(self, fp, peer_info):
         try:
@@ -468,7 +437,6 @@ class CompleteNetwork:
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
     async def _flush_message_queue(self, fp):
-        await asyncio.sleep(0.5)
         if fp in self.message_queue and self.message_queue[fp]:
             print(f"📬 Entregando mensajes en cola a {fp[:8]}...")
             peer_info = self.discovered.get(fp)
@@ -649,9 +617,6 @@ class CompleteNetwork:
                 if remote_static:
                     if self.noise.update_session_with_peer_key(remote_static, remote_fp):
                          print(f"✅ Handshake COMPLETADO con {self._get_clean_name(remote_fp)}")
-                         # [NUEVO] Ya hemos terminado, liberamos el freno.
-                         if remote_fp in self.handshake_in_progress:
-                             del self.handshake_in_progress[remote_fp]
                          # Intentar vaciar cola si había mensajes pendientes
                          asyncio.create_task(self._flush_message_queue(remote_fp))
         except Exception as e:
