@@ -57,6 +57,22 @@ class GuiNetwork(CompleteNetwork):
         self.ui.log_system(f"🔍 Peer detectado: {info.get('name')} ({info.get('ip')})")
         self.ui.update_ui()
 
+    def force_disconnect_peer(self, fp):
+        """
+        Esta función se ejecuta cuando llega el paquete UDP 'DISCONNECT'.
+        """
+        # 1. Obtenemos el nombre antes de borrarlo para el log
+        name = "Desconocido"
+        if fp in self.discovered:
+            name = self.discovered[fp].get('name', 'Peer')
+
+        # 2. Llamamos a la lógica base que lo borra de self.discovered
+        super().force_disconnect_peer(fp)
+
+        # 3. Actualizamos la UI
+        self.ui.log_system(f"🔌 {name} se ha desconectado (Offline Instantáneo).")
+        self.ui.update_ui()
+
     # [NUEVO] ESTO ES LO QUE TE FALTABA PARA EL (OFF)
     def remove_discovered_peer(self, instance_name):
         # 1. Borramos de la lógica de red
