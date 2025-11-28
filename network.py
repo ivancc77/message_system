@@ -291,6 +291,30 @@ class CompleteNetwork:
         self.my_fingerprint = ""
         self.my_name = ""
     
+    def _clear_peer_state(self, fp: str):
+        """
+        Elimina toda la información de sesión para un peer:
+        - conexión en ConnectionManager
+        - sesión Noise
+        (NO borra la cola de mensajes, para poder reenviarlos luego)
+        """
+        try:
+            # Borrar sesión Noise
+            if self.noise and hasattr(self.noise, "sessions"):
+                self.noise.sessions.pop(fp, None)
+        except Exception:
+            pass
+
+        try:
+            # Borrar conexión lógica
+            cid = self.connection_manager.get_cid_for_peer(fp)
+            if cid is not None:
+                self.connection_manager.connections.pop(cid, None)
+                self.connection_manager.cid_to_peer.pop(cid, None)
+            self.connection_manager.peer_to_cid.pop(fp, None)
+        except Exception:
+            pass
+
     def _load_contacts(self):
         if os.path.exists(self.contacts_file):
             try:
@@ -387,19 +411,18 @@ class CompleteNetwork:
         fp_to_remove = None
         
         # Buscamos coincidencias (exactas o parciales)
-        for fp, info in self.discovered.items():
+        for fp, info in list(self.discovered.items()):
             stored_name = info.get('instance_name', '')
-            # Comparamos ignorando mayúsculas y posibles puntos finales
             if stored_name.strip('.') == instance_name.strip('.'):
                 fp_to_remove = fp
                 break
         
         if fp_to_remove:
+            # >>> NUEVO: limpiar estado de conexión / sesión
+            self._clear_peer_state(fp_to_remove)
+
             # Borramos de la lista de ONLINE
             del self.discovered[fp_to_remove]
-            # Si estamos usando interfaz gráfica, esto disparará el update_ui
-            # en el archivo interface.py, y como ya no está en 'discovered',
-            # get_peers() lo cogerá del JSON y le pondrá el (OFF).
             print(f"📉 Peer pasado a OFFLINE: {fp_to_remove[:8]}")
 
     # [NUEVO] Método para procesar cola de mensajes (Postcards)
@@ -519,19 +542,37 @@ class CompleteNetwork:
 
     def handle_packet(self, data, addr):
         try:
-            cid, sid, mtype, payload = self.connection_manager.parse_packet(data)
+            # 1. Parseo básico
+            if len(data) < 12: return
+            cid, sid, mtype, length = struct.unpack('!IIHH', data[:12])
+            payload = data[12:12+length]
+            
+            # 2. Intentamos identificar por CID (Session ID)
             peer_fp = self.connection_manager.get_peer_for_cid(cid)
             
+            # 3. [CORRECCIÓN] Si es un ADIÓS y no encontramos el CID, buscamos por IP
+            if mtype == MessageType.DISCONNECT and not peer_fp:
+                # print(f"⚠️ Debug: CID {cid} desconocido, intentando recuperar por IP {addr}...")
+                peer_fp = self._get_peer_fp_by_addr(addr)
+
+            # 4. Procesar mensajes
             if mtype == MessageType.HANDSHAKE_INIT:
                 self._handle_handshake_init(cid, payload, addr)
             elif mtype == MessageType.HANDSHAKE_RESPONSE:
                 self._handle_handshake_response(payload, peer_fp)
             elif mtype == MessageType.TEXT_MESSAGE and peer_fp:
                 self._handle_text(payload, peer_fp)
-            elif mtype == MessageType.DISCONNECT and peer_fp:
-                print(f"🔌 Recibida señal de desconexión de {peer_fp[:8]}")
-                self._handle_disconnect(peer_fp)
-        except Exception as e: print(f"Packet Error: {e}")
+            elif mtype == MessageType.DISCONNECT:
+                # Si logramos identificar al usuario (por CID o por IP), lo desconectamos
+                if peer_fp:
+                    # print(f"🔌 Desconexión confirmada para {peer_fp[:8]}")
+                    self._handle_disconnect(peer_fp) 
+                else:
+                    # Si llega aquí, es un paquete fantasma (no conocemos ni la IP)
+                    pass 
+
+        except Exception as e:
+            print(f"Packet Error: {e}")
 
     def _handle_handshake_init(self, cid, payload, addr):
         try:
@@ -587,49 +628,81 @@ class CompleteNetwork:
         """
         peer_info = self.discovered.get(remote_fp)
         if peer_info:
-            # Obtenemos el instance_name para usar el método estándar de borrado
             instance_name = peer_info.get('instance_name')
             if instance_name:
+                # remove_discovered_peer ya se encarga de limpiar todo
                 self.remove_discovered_peer(instance_name)
             else:
-                # Fallback por si no tiene instance_name, lo borramos a mano
+                # Fallback por si no tiene instance_name
+                self._clear_peer_state(remote_fp)
                 del self.discovered[remote_fp]
+    
+    def _get_peer_fp_by_addr(self, addr):
+        """Busca un usuario por su IP y puerto si el CID falla"""
+        target_ip, target_port = addr
+        for fp, info in self.discovered.items():
+            # Comparamos IP (y opcionalmente puerto, aunque el puerto puede variar en NAT)
+            if info.get('ip') == target_ip:
+                 return fp
+        return None
 
     async def broadcast_goodbye(self):
-        """
-        Envía un paquete de desconexión a todos los peers con los que tenemos sesión.
-        """
-        print("👋 Enviando señales de desconexión a peers...")
-        # Iteramos sobre una copia para evitar errores de concurrencia
+        print("🛑 INICIANDO PROTOCOLO DE DESPEDIDA...")
+        peers_count = 0
+        # Hacemos una copia de la lista para evitar errores mientras iteramos
         active_peers = list(self.discovered.values())
         
         for peer in active_peers:
             fp = peer['fingerprint']
-            cid = self.connection_manager.get_cid_for_peer(fp)
-            
-            if cid: # Solo si tenemos conexión establecida
-                try:
-                    # Creamos paquete de desconexión (vacío o con payload simple)
-                    payload = msgpack.packb({'bye': True})
-                    # Lo encriptamos para seguridad (opcional en desconexión, pero recomendado)
-                    encrypted = self.noise.encrypt_message(payload, fp)
-                    
-                    # Usamos SID 0 o uno nuevo, no importa mucho para el bye
-                    pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
-                    
-                    self.udp_transport.sendto(pkt, (peer['ip'], peer['port']))
-                except Exception as e:
-                    print(f"Error enviando goodbye a {fp[:8]}: {e}")
+            ip = peer.get('ip')
+            port = peer.get('port')
+            # Si por cualquier motivo falta IP o puerto, saltamos
+            if not ip or not port:
+                continue
+
+            peers_count += 1
+            print(f"   -> Enviando ADIÓS a {peer.get('name', 'Peer')[:10]} ({ip})...")
+
+            try:
+                # Payload simple
+                payload = msgpack.packb({'bye': True})
+
+                # Si hay sesión Noise usamos cifrado; si no, encrypt_message devolverá el payload tal cual
+                encrypted = self.noise.encrypt_message(payload, fp) if self.noise else payload
+
+                # Si no hay CID, usamos 0 (en el receptor se resuelve por IP con _get_peer_fp_by_addr)
+                cid = self.connection_manager.get_cid_for_peer(fp) or 0
+
+                # ENVIAMOS 3 VECES (Redundancia UDP)
+                pkt = self.connection_manager.create_packet(cid, 0, MessageType.DISCONNECT, encrypted)
+                for _ in range(3):
+                    self.udp_transport.sendto(pkt, (ip, port))
+
+            except Exception as e:
+                print(f"   ❌ Error enviando a {fp[:8]}: {e}")
+
+        print(f"🛑 Despedida enviada a {peers_count} usuarios.")
+
+
+    def force_disconnect_peer(self, fp):
+        """
+        Borra un peer directamente usando su Fingerprint.
+        Este método será sobreescrito en interface.py para actualizar la UI.
+        """
+        if fp in self.discovered:
+            del self.discovered[fp]
+            print(f"📉 Peer eliminado de la lista interna: {fp[:8]}")
         
     async def stop(self):
-        # Primero enviamos el adiós
+        # Enviar despedida
         await self.broadcast_goodbye()
-        # Pequeña pausa para asegurar que los paquetes UDP salgan
-        await asyncio.sleep(0.1)
+        
+        # [IMPORTANTE] Aumenta esto a 0.5 o 1.0 si sigue fallando
+        await asyncio.sleep(0.5) 
         
         if self.udp_transport: self.udp_transport.close()
         if self.zeroconf: await self.zeroconf.async_close()
-        
+
 class CompleteUDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, net): self.net = net
     def datagram_received(self, data, addr): self.net.handle_packet(data, addr)
