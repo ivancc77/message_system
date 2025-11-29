@@ -1,5 +1,5 @@
 """
-Red P2P Completa - VERSION ACADÉMICA (CORREGIDA)
+Red P2P Completa 
 Cumple requisitos: BLAKE2s, Verificación Firma DNIe, Cola Offline
 """
 import asyncio
@@ -149,7 +149,7 @@ class NoiseIKProtocol:
         )
         key_material = hkdf.derive(es + ss)
         
-        # --- CORRECCIÓN DE SIMETRÍA ---
+        
         k1 = key_material[:32]
         k2 = key_material[32:64]
         
@@ -187,7 +187,7 @@ class NoiseIKProtocol:
         except Exception as e: 
             raise e
 
-# --- ConnectionManager y SimpleListener se mantienen igual que tu original ---
+# --- ConnectionManager y SimpleListener ---
 class ConnectionManager:
     # (Copiar código original de ConnectionManager aquí, no cambia)
     def __init__(self):
@@ -230,7 +230,6 @@ class SimpleListener(ServiceListener):
     def update_service(self, zc, type_, name): pass
     
     def remove_service(self, zc, type_, name):
-        # [NUEVO] Detectamos cuando un servicio desaparece
         # Ejecutamos en el bucle principal para evitar bloqueos
         asyncio.get_event_loop().call_soon_threadsafe(
             self.network.remove_discovered_peer, name
@@ -242,7 +241,6 @@ class SimpleListener(ServiceListener):
     def __call__(self, zeroconf, service_type, name, state_change):
         if state_change == ServiceStateChange.Added:
             self.add_service(zeroconf, service_type, name)
-        # [NUEVO] Manejamos el evento de eliminación explícitamente
         elif state_change == ServiceStateChange.Removed:
             self.remove_service(zeroconf, service_type, name)
     
@@ -273,7 +271,7 @@ class CompleteNetwork:
         self.peers = {} 
         self.discovered = {}
         
-        # [CORRECCIÓN] Cola de mensajes para entrega diferida (Postcards)
+        # Cola de mensajes para entrega diferida (Postcards)
         self.message_queue = {} 
 
         self.contacts_file = "contacts.json"
@@ -509,7 +507,7 @@ class CompleteNetwork:
             content = msgpack.unpackb(payload, raw=False)
             remote_fp = content.get('dnie_fingerprint')
             
-            # [CORRECCIÓN] Pasamos el contenido completo al noise para validar firma
+            # Pasamos el contenido completo al noise para validar firma
             if self.noise.accept_handshake(content):
                 print(f"🔒 Sesión segura establecida con {self._get_clean_name(remote_fp)}")
                 

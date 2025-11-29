@@ -17,7 +17,7 @@ from prompt_toolkit.key_binding import KeyBindings
 # [FIX WINDOWS] Necesario para que la TUI no se congele al redirigir stdout
 from prompt_toolkit.output import create_output 
 
-# Importamos TU código original
+# Importamos el código original
 from dnie_real import DNIeReal
 from network import CompleteNetwork
 
@@ -57,7 +57,7 @@ class GuiNetwork(CompleteNetwork):
         self.ui.log_system(f"🔍 Peer detectado: {info.get('name')} ({info.get('ip')})")
         self.ui.update_ui()
         
-    # [NUEVO] ESTO ES LO QUE TE FALTABA PARA EL (OFF)
+    # ESTO ES LO QUE TE FALTABA PARA EL (OFF)
     def remove_discovered_peer(self, instance_name):
         # 1. Borramos de la lógica de red
         super().remove_discovered_peer(instance_name)
@@ -70,7 +70,7 @@ class GuiNetwork(CompleteNetwork):
         Borra un peer directamente usando su Fingerprint.
         Este método será sobreescrito en interface.py para actualizar la UI.
         """
-        # --- NUEVO: limpiar estado asociado ---
+        # --- Limpiar estado asociado ---
         self._clear_peer_state(fp)
 
         if fp in self.discovered:
