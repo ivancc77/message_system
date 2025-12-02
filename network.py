@@ -1,6 +1,6 @@
 """
-Red P2P Completa 
-Cumple requisitos: BLAKE2s, Verificación Firma DNIe, Cola Offline, TOFU Seguro (Real Name Bidireccional)
+Red P2P Completa - VERSION ACADÉMICA (CORREGIDA + REAL NAME)
+Cumple requisitos: BLAKE2s, Verificación Firma DNIe, Cola Offline, TOFU Seguro
 """
 import asyncio
 import socket
@@ -15,11 +15,13 @@ from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
 from zeroconf import ServiceInfo, ServiceListener, ServiceStateChange
 
 import msgpack
-# Imports Criptografía
+# Imports Criptografía Asimétrica (ECC + RSA)
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
-from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding 
+from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding # Para verificar DNIe
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography import x509 
+from cryptography import x509 # Para parsear certificados
+
+# Imports Criptografía Simétrica y KDF
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -41,6 +43,7 @@ class NoiseIKProtocol:
         ephemeral_private = X25519PrivateKey.generate()
         ephemeral_public = ephemeral_private.public_key()
         
+        # Si es la primera vez (TOFU), asumimos una clave temporal.
         if not remote_static_key_bytes:
              remote_static = X25519PrivateKey.generate().public_key() 
         else:
@@ -48,6 +51,7 @@ class NoiseIKProtocol:
         
         self.temp_ephemeral = ephemeral_private
         
+        # Intercambio Diffie-Hellman (X25519)
         es = ephemeral_private.exchange(remote_static)
         ss = self.static_private.exchange(remote_static)
         
@@ -59,7 +63,7 @@ class NoiseIKProtocol:
         static_bytes = self.static_public.public_bytes(
             encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
         
-        # Firmar nuestra clave estática con DNIe
+        # Firmamos nuestra clave estática con el DNIe
         signature = self.dnie.sign_data(static_bytes)
         
         handshake_message = {
@@ -67,24 +71,22 @@ class NoiseIKProtocol:
             'static_public': static_bytes,
             'dnie_fingerprint': self.dnie.get_fingerprint(),
             'dnie_signature': signature,
+            # [CORRECCIÓN] Enviamos el certificado para que el otro pueda verificar
             'dnie_cert_data': self.dnie.get_certificate_der(), 
             'protocol_version': '1.0'
         }
         
         return msgpack.packb(handshake_message), session
 
-    def verify_identity(self, static_bytes, cert_data, signature, fingerprint):
-        """
-        Función auxiliar para verificar DNIe y extraer nombre.
-        Se usa tanto en Handshake Init como en Response.
-        """
+    def verify_identity_and_get_name(self, static_bytes, cert_data, signature, fingerprint):
+        """Función auxiliar para verificar firma y extraer nombre real"""
         try:
             if not cert_data: return None
             
             # 1. Verificar Fingerprint
             computed_fp = hashlib.sha256(cert_data).hexdigest()
             if computed_fp != fingerprint:
-                print("⚠️ Fingerprint no coincide con certificado")
+                print("⚠️ Fingerprint no coincide")
                 return None
 
             # 2. Verificar Firma RSA
@@ -111,27 +113,28 @@ class NoiseIKProtocol:
             return None
 
     def accept_handshake(self, payload_dict):
-        """Procesa el mensaje inicial de handshake (INIT)"""
+        """
+        [CORRECCIÓN CRÍTICA] Verifica la firma del DNIe y devuelve el Nombre Real
+        """
         try:
             sender_static_bytes = payload_dict['static_public']
             sender_ephemeral_bytes = payload_dict['ephemeral_public']
             sender_fp = payload_dict['dnie_fingerprint']
-            
-            # --- VERIFICACIÓN DE IDENTIDAD ---
-            real_name = self.verify_identity(
-                sender_static_bytes, 
-                payload_dict.get('dnie_cert_data'), 
-                payload_dict.get('dnie_signature'),
-                sender_fp
+            signature = payload_dict['dnie_signature']
+            cert_data = payload_dict.get('dnie_cert_data')
+
+            # 1. Verificar Identidad
+            real_name = self.verify_identity_and_get_name(
+                sender_static_bytes, cert_data, signature, sender_fp
             )
             
             if not real_name:
-                print("⛔ Firma inválida en Handshake Init")
+                print("⛔ Firma inválida en Handshake")
                 return None
 
-            print(f"✅ Firma DNIe (Init) verificada. Real: {real_name}")
+            print(f"✅ Firma DNIe verificada. Real: {real_name}")
 
-            # --- CRYPTO NOISE ---
+            # 2. Continuar con criptografía Noise
             sender_static = X25519PublicKey.from_public_bytes(sender_static_bytes)
             sender_ephemeral = X25519PublicKey.from_public_bytes(sender_ephemeral_bytes)
             
@@ -141,7 +144,7 @@ class NoiseIKProtocol:
             session = self._derive_session(es, ss, sender_fp, is_initiator=False)
             self.sessions[sender_fp] = session
             
-            return real_name
+            return real_name # Devolvemos el nombre real validado
 
         except Exception as e:
             print(f"❌ Error crypto handshake: {e}")
@@ -160,6 +163,7 @@ class NoiseIKProtocol:
             return False
 
     def _derive_session(self, es, ss, fp, is_initiator: bool):
+        # Derivación HKDF
         hkdf = HKDF(
             algorithm=hashes.BLAKE2s(digest_size=32),
             length=64,
@@ -167,6 +171,7 @@ class NoiseIKProtocol:
             info=b'DNI-IM-v2',
         )
         key_material = hkdf.derive(es + ss)
+        
         k1 = key_material[:32]
         k2 = key_material[32:64]
         
@@ -282,10 +287,15 @@ class CompleteNetwork:
         self.noise = None
         self.udp_transport = None
         self.zeroconf = None 
+        self.peers = {} 
         self.discovered = {}
+        
+        # Cola de mensajes para entrega diferida (Postcards)
         self.message_queue = {} 
+
         self.contacts_file = "contacts.json"
         self.trusted_contacts = self._load_contacts()
+
         self.UDP_PORT = 6666
         self.SERVICE_TYPE = "_dni-im._udp.local."
         self.my_fingerprint = ""
@@ -294,27 +304,30 @@ class CompleteNetwork:
     def _load_contacts(self):
         if os.path.exists(self.contacts_file):
             try:
-                with open(self.contacts_file, 'r') as f:
+                with open(self.contacts_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except: return {}
         return {}
 
     def _save_contacts(self):
         try:
-            with open(self.contacts_file, 'w') as f:
-                json.dump(self.trusted_contacts, f, indent=4)
+            with open(self.contacts_file, 'w', encoding='utf-8') as f:
+                json.dump(self.trusted_contacts, f, indent=4, ensure_ascii=False)
         except: pass
 
     def _update_contact_real_name(self, fp, real_name):
-        """Guarda o actualiza el nombre real en el JSON"""
+        """Guarda/Actualiza el nombre real en el JSON"""
+        # Limpiar basura del nombre del certificado
+        clean_real_name = real_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
+        
         if fp not in self.trusted_contacts:
             self.trusted_contacts[fp] = {
-                'name': real_name, 
+                'name': clean_real_name, 
                 'added': time.time(),
-                'dnie_real_name': real_name
+                'dnie_real_name': clean_real_name
             }
         else:
-            self.trusted_contacts[fp]['dnie_real_name'] = real_name
+            self.trusted_contacts[fp]['dnie_real_name'] = clean_real_name
         self._save_contacts()
 
     def _load_identity(self) -> X25519PrivateKey:
@@ -368,13 +381,14 @@ class CompleteNetwork:
         if fp == self.my_fingerprint: return
         
         name = info['name']
+        
         if fp in self.trusted_contacts:
             stored_name = self.trusted_contacts[fp]['name']
             info['name'] = stored_name 
         else:
             for trusted_fp, data in self.trusted_contacts.items():
                 if data['name'] == name and trusted_fp != fp:
-                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave!")
+                    print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave! Podría ser un ataque.")
                     info['name'] = f"{name} (NO VERIFICADO)"
             
             if fp not in self.trusted_contacts:
@@ -416,6 +430,7 @@ class CompleteNetwork:
                         'instance_name': 'offline'
                     }
                     all_peers.append(offline_peer)
+        
         return all_peers
     
     def _get_clean_name(self, fp):
@@ -499,7 +514,7 @@ class CompleteNetwork:
             content = msgpack.unpackb(payload, raw=False)
             remote_fp = content.get('dnie_fingerprint')
             
-            # 1. Verificar firma del que inicia y obtener nombre
+            # [NUEVO] Recibimos el NOMBRE REAL validado
             real_name_dnie = self.noise.accept_handshake(content)
             
             if real_name_dnie:
@@ -511,11 +526,10 @@ class CompleteNetwork:
                 if not self.connection_manager.get_cid_for_peer(remote_fp):
                     self.connection_manager.create_connection(remote_fp, {'ip': addr[0], 'port': addr[1]})
                 
-                # 2. Preparar Respuesta (ACK) incluyendo MI CERTIFICADO
                 my_static = self.noise.static_public.public_bytes(
                     encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
                 
-                # Firmar mi clave estática también para enviársela de vuelta
+                # [NUEVO] FIRMAR LA RESPUESTA PARA BIDIRECCIONALIDAD
                 my_sig = self.dnie.sign_data(my_static)
 
                 ack_payload = msgpack.packb({
@@ -540,19 +554,20 @@ class CompleteNetwork:
             if content.get('ack') and remote_fp:
                 remote_static = content.get('static_public')
                 
-                # --- NUEVO: Verificar también la respuesta (Bidireccional) ---
+                # [NUEVO] Verificar también la respuesta (Bidireccional)
                 cert_data = content.get('dnie_cert_data')
                 signature = content.get('dnie_signature')
                 
                 if cert_data and signature and remote_static:
-                    real_name_resp = self.noise.verify_identity(remote_static, cert_data, signature, remote_fp)
+                    real_name_resp = self.noise.verify_identity_and_get_name(
+                        remote_static, cert_data, signature, remote_fp
+                    )
                     if real_name_resp:
                         print(f"✅ Identidad del Peer (Resp) verificada: {real_name_resp}")
                         # GUARDAR NOMBRE (Como Iniciador)
                         self._update_contact_real_name(remote_fp, real_name_resp)
                     else:
                         print("⚠️ Respuesta de handshake con firma inválida")
-                # -------------------------------------------------------------
 
                 if remote_static:
                     if self.noise.update_session_with_peer_key(remote_static, remote_fp):
