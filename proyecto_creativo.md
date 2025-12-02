@@ -62,6 +62,21 @@ El software actual (`main.py`, `network.py`, `interface.py`, `dnie_real.py`) cum
 
 ---
 
+## 4. 👥 Autoría y Metodología de Trabajo
+
+Este proyecto ha sido desarrollado de manera **conjunta e integral** por **Iván Ciudad** y **Víctor Carbajo**.
+
+Ambos integrantes hemos participado equitativamente en todas las fases del ciclo de vida del software, aplicando una metodología de *Pair Programming* (programación en pareja) y trabajo colaborativo para abordar cada desafío técnico:
+
+* **Hardware y Seguridad:** Investigación conjunta sobre `pkcs11`, extracción de certificados del DNIe y firma digital.
+* **Red y Protocolo:** Diseño e implementación simultánea del transporte UDP, el protocolo Noise IK y el sistema de descubrimiento mDNS.
+* **Interfaces:** Desarrollo coordinado tanto de la interfaz de consola (TUI) como de la gráfica (GUI).
+* **Depuración:** Resolución conjunta de los problemas de concurrencia, "efecto espejo" en la encriptación y gestión de estados offline.
+
+Todas las decisiones de arquitectura y la escritura del código han sido consensuadas y ejecutadas en colaboración directa por todo el equipo.
+
+---
+
 # 📜 Anexo: Historial Literal de Peticiones del Cliente
 
 A continuación se listan las interacciones textuales exactas que guiaron el desarrollo del proyecto:
