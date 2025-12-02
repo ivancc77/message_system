@@ -1,6 +1,6 @@
 """
-Red P2P Completa - VERSION ACADÉMICA (CORREGIDA + REAL NAME)
-Cumple requisitos: BLAKE2s, Verificación Firma DNIe, Cola Offline, TOFU Seguro
+Red P2P Completa - VERSION ACADÉMICA (CORREGIDA)
+Cumple requisitos: BLAKE2s, Verificación Firma DNIe, Cola Offline
 """
 import asyncio
 import socket
@@ -43,7 +43,8 @@ class NoiseIKProtocol:
         ephemeral_private = X25519PrivateKey.generate()
         ephemeral_public = ephemeral_private.public_key()
         
-        # Si es la primera vez (TOFU), asumimos una clave temporal.
+        # Si es la primera vez (TOFU), asumimos una clave temporal, 
+        # pero idealmente deberíamos tener la clave del peer guardada.
         if not remote_static_key_bytes:
              remote_static = X25519PrivateKey.generate().public_key() 
         else:
@@ -78,45 +79,9 @@ class NoiseIKProtocol:
         
         return msgpack.packb(handshake_message), session
 
-    # [NUEVO] Función auxiliar para verificar firma y extraer nombre limpio
-    def verify_identity_and_get_name(self, static_bytes, cert_data, signature, fingerprint):
-        try:
-            if not cert_data: return None
-            
-            # 1. Verificar Fingerprint
-            computed_fp = hashlib.sha256(cert_data).hexdigest()
-            if computed_fp != fingerprint:
-                print("⚠️ Fingerprint no coincide")
-                return None
-
-            # 2. Verificar Firma RSA
-            cert = x509.load_der_x509_certificate(cert_data)
-            public_key_rsa = cert.public_key()
-            public_key_rsa.verify(
-                signature,
-                static_bytes,
-                rsa_padding.PKCS1v15(), 
-                hashes.SHA256()
-            )
-
-            # 3. Extraer Nombre Real (CN) y LIMPIARLO
-            subject = cert.subject
-            real_name = "Desconocido"
-            for attr in subject:
-                if attr.oid == x509.NameOID.COMMON_NAME:
-                    raw_val = attr.value
-                    # Limpiamos la basura del nombre
-                    real_name = raw_val.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
-                    break
-            
-            return real_name
-        except Exception as e:
-            print(f"❌ Error verificando identidad: {e}")
-            return None
-
     def accept_handshake(self, payload_dict):
         """
-        [CORRECCIÓN CRÍTICA] Verifica la firma del DNIe y devuelve el Nombre Real
+        [CORRECCIÓN CRÍTICA] Verifica la firma del DNIe del remitente
         """
         try:
             sender_static_bytes = payload_dict['static_public']
@@ -125,16 +90,27 @@ class NoiseIKProtocol:
             signature = payload_dict['dnie_signature']
             cert_data = payload_dict.get('dnie_cert_data')
 
-            # 1. Verificar Identidad usando la nueva función
-            real_name = self.verify_identity_and_get_name(
-                sender_static_bytes, cert_data, signature, sender_fp
-            )
-            
-            if not real_name:
-                print("⛔ Firma inválida en Handshake")
-                return None # Devolvemos None si falla
+            # 1. Verificar Firma Digital del DNIe (Autenticación Real)
+            if not cert_data:
+                print("⚠️ Handshake rechazado: Falta certificado DNIe")
+                return False
 
-            print(f"✅ Firma DNIe verificada. Real: {real_name}")
+            cert = x509.load_der_x509_certificate(cert_data)
+            # Verificar que el fingerprint coincide con el certificado enviado
+            computed_fp = hashlib.sha256(cert_data).hexdigest()
+            if computed_fp != sender_fp:
+                print("⚠️ Handshake rechazado: Fingerprint no coincide")
+                return False
+
+            # Verificar la firma RSA sobre la clave estática Noise
+            public_key_rsa = cert.public_key()
+            public_key_rsa.verify(
+                signature,
+                sender_static_bytes,
+                rsa_padding.PKCS1v15(), # El DNIe usa PKCS#1 v1.5 habitualmente
+                hashes.SHA256()
+            )
+            print(f"✅ Firma DNIe verificada para {sender_fp[:8]}")
 
             # 2. Continuar con criptografía Noise
             sender_static = X25519PublicKey.from_public_bytes(sender_static_bytes)
@@ -145,12 +121,11 @@ class NoiseIKProtocol:
             
             session = self._derive_session(es, ss, sender_fp, is_initiator=False)
             self.sessions[sender_fp] = session
-            
-            return real_name # Devolvemos el nombre real validado
+            return True
 
         except Exception as e:
             print(f"❌ Error crypto handshake: {e}")
-            return None
+            return False
 
     def update_session_with_peer_key(self, remote_static_bytes, remote_fingerprint):
         try:
@@ -165,7 +140,7 @@ class NoiseIKProtocol:
             return False
 
     def _derive_session(self, es, ss, fp, is_initiator: bool):
-        # Derivación HKDF
+        # Derivación HKDF (Igual que tenías)
         hkdf = HKDF(
             algorithm=hashes.BLAKE2s(digest_size=32),
             length=64,
@@ -174,6 +149,7 @@ class NoiseIKProtocol:
         )
         key_material = hkdf.derive(es + ss)
         
+        # --- CORRECCIÓN DE SIMETRÍA ---
         k1 = key_material[:32]
         k2 = key_material[32:64]
         
@@ -181,6 +157,7 @@ class NoiseIKProtocol:
             send_key = k1
             recv_key = k2
         else:
+            # Si soy el que responde, cruzo las claves
             send_key = k2
             recv_key = k1
             
@@ -210,8 +187,9 @@ class NoiseIKProtocol:
         except Exception as e: 
             raise e
 
-# --- ConnectionManager y SimpleListener ---
+# --- ConnectionManager y SimpleListener se mantienen igual que tu original ---
 class ConnectionManager:
+    # (Copiar código original de ConnectionManager aquí, no cambia)
     def __init__(self):
         self.connections = {}
         self.next_cid = 1
@@ -252,6 +230,8 @@ class SimpleListener(ServiceListener):
     def update_service(self, zc, type_, name): pass
     
     def remove_service(self, zc, type_, name):
+        # [NUEVO] Detectamos cuando un servicio desaparece
+        # Ejecutamos en el bucle principal para evitar bloqueos
         asyncio.get_event_loop().call_soon_threadsafe(
             self.network.remove_discovered_peer, name
         )
@@ -262,6 +242,7 @@ class SimpleListener(ServiceListener):
     def __call__(self, zeroconf, service_type, name, state_change):
         if state_change == ServiceStateChange.Added:
             self.add_service(zeroconf, service_type, name)
+        # [NUEVO] Manejamos el evento de eliminación explícitamente
         elif state_change == ServiceStateChange.Removed:
             self.remove_service(zeroconf, service_type, name)
     
@@ -292,7 +273,7 @@ class CompleteNetwork:
         self.peers = {} 
         self.discovered = {}
         
-        # Cola de mensajes para entrega diferida (Postcards)
+        # [CORRECCIÓN] Cola de mensajes para entrega diferida (Postcards)
         self.message_queue = {} 
 
         self.contacts_file = "contacts.json"
@@ -306,32 +287,19 @@ class CompleteNetwork:
     def _load_contacts(self):
         if os.path.exists(self.contacts_file):
             try:
-                # [CORRECCIÓN] utf-8 para leer
-                with open(self.contacts_file, 'r', encoding='utf-8') as f:
+                with open(self.contacts_file, 'r') as f:
                     return json.load(f)
             except: return {}
         return {}
 
     def _save_contacts(self):
         try:
-            # [CORRECCIÓN] utf-8 y ensure_ascii=False para guardar tildes bien
-            with open(self.contacts_file, 'w', encoding='utf-8') as f:
-                json.dump(self.trusted_contacts, f, indent=4, ensure_ascii=False)
+            with open(self.contacts_file, 'w') as f:
+                json.dump(self.trusted_contacts, f, indent=4)
         except: pass
 
-    def _update_contact_real_name(self, fp, real_name):
-        """Guarda/Actualiza el nombre real en el JSON"""
-        if fp not in self.trusted_contacts:
-            self.trusted_contacts[fp] = {
-                'name': real_name, 
-                'added': time.time(),
-                'dnie_real_name': real_name
-            }
-        else:
-            self.trusted_contacts[fp]['dnie_real_name'] = real_name
-        self._save_contacts()
-
     def _load_identity(self) -> X25519PrivateKey:
+        # Se mantiene igual
         key_file = "identity.pem"
         if os.path.exists(key_file):
             with open(key_file, "rb") as f: return X25519PrivateKey.from_private_bytes(f.read())
@@ -345,6 +313,7 @@ class CompleteNetwork:
             return key
 
     async def start(self, username: str):
+        # Se mantiene igual
         self.my_name = username
         self.my_fingerprint = self.dnie.get_fingerprint()
         static_private = self._load_identity()
@@ -358,6 +327,7 @@ class CompleteNetwork:
         await self._start_mdns()
 
     async def _start_mdns(self):
+        # Se mantiene igual
         self.zeroconf = AsyncZeroconf()
         local_ip = self._get_local_ip()
         desc = {'fingerprint': self.my_fingerprint, 'real_name': self.my_name}
@@ -383,31 +353,37 @@ class CompleteNetwork:
         
         name = info['name']
         
+        # --- LÓGICA TOFU (Trust On First Use) ---
         if fp in self.trusted_contacts:
+            # Ya lo conocemos, actualizamos nombre si ha cambiado (opcional)
             stored_name = self.trusted_contacts[fp]['name']
-            info['name'] = stored_name 
+            info['name'] = stored_name # Mantenemos el nombre que nosotros confiamos
         else:
+            # ¿Es un nombre que ya conocemos pero con OTRA clave? (ALERTA DE SEGURIDAD)
             for trusted_fp, data in self.trusted_contacts.items():
                 if data['name'] == name and trusted_fp != fp:
                     print(f"🚨 ALERTA: '{name}' ha cambiado de DNIe/Clave! Podría ser un ataque.")
                     info['name'] = f"{name} (NO VERIFICADO)"
             
+            # Si es totalmente nuevo, lo guardamos (Trust First Use)
             if fp not in self.trusted_contacts:
                 self.trusted_contacts[fp] = {'name': name, 'added': time.time()}
                 self._save_contacts()
-                
+        # [CORRECCIÓN] Si el peer reaparece, intentamos enviar cola
         is_new = fp not in self.discovered
         self.discovered[fp] = info
         
         if is_new or fp in self.message_queue:
             asyncio.create_task(self._flush_message_queue(fp))
 
+    # [NUEVO] Método para procesar cola de mensajes (Postcards)
     async def _flush_message_queue(self, fp):
         if fp in self.message_queue and self.message_queue[fp]:
             print(f"📬 Entregando mensajes en cola a {fp[:8]}...")
             peer_info = self.discovered.get(fp)
             if not peer_info: return
             
+            # Copiar cola y vaciar original
             pending = self.message_queue[fp][:]
             self.message_queue[fp] = []
             
@@ -416,16 +392,17 @@ class CompleteNetwork:
                 await asyncio.sleep(0.1)
 
     def get_peers(self):
+        # 1. Cogemos a los que están ONLINE (detectados ahora mismo)
         all_peers = list(self.discovered.values())
         online_fps = {p['fingerprint'] for p in all_peers}
 
+        # 2. Añadimos a los de la AGENDA (contacts.json) si no están online
         if hasattr(self, 'trusted_contacts'):
             for fp, info in self.trusted_contacts.items():
                 if fp not in online_fps:
+                    # Creamos un "peer fantasma" para que salga en la lista
+                    # Le ponemos (OFF) en el nombre para que sepas que no está conectado
                     clean_name = info['name'].replace("(AUTENTICACIÓN)", "").strip()
-                    if 'dnie_real_name' in info:
-                        clean_name = info['dnie_real_name'] # Usamos el nombre real si existe
-                    
                     offline_peer = {
                         'fingerprint': fp,
                         'name': f"{clean_name} (OFF)", 
@@ -438,19 +415,20 @@ class CompleteNetwork:
         return all_peers
     
     def _get_clean_name(self, fp):
-        if fp in self.trusted_contacts and 'dnie_real_name' in self.trusted_contacts[fp]:
-             return self.trusted_contacts[fp]['dnie_real_name']
         peer = self.discovered.get(fp)
         raw_name = peer.get('name', fp[:8]) if peer else fp[:8]
         return raw_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
 
     async def send_message(self, target_name_or_fp, text):
+        # 1. Intentar encontrar al usuario en la lista de ONLINE (discovered)
         peer_info = self.discovered.get(target_name_or_fp)
         target_fp = target_name_or_fp
         
+        # Si nos han pasado un nombre en vez de un fingerprint, lo buscamos
         if not peer_info:
              target_lower = target_name_or_fp.lower()
              for fp, p in self.discovered.items():
+                 # Buscamos por nombre o por nombre de instancia
                  p_name = p.get('name', '').lower()
                  p_inst = p.get('instance_name', '').lower()
                  if target_lower in p_name or target_lower in p_inst:
@@ -458,24 +436,36 @@ class CompleteNetwork:
                      target_fp = fp
                      break
         
+        # Si no lo encontramos en ONLINE, miramos si es un contacto de la AGENDA
         if not peer_info and hasattr(self, 'trusted_contacts'):
              if target_fp in self.trusted_contacts:
-                 pass 
+                 # Es un contacto conocido, pero está OFFLINE
+                 pass # peer_info sigue siendo None, lo manejaremos abajo
              else:
+                 # Quizás el user pasó un nombre de la agenda
                  for fp, info in self.trusted_contacts.items():
                      if info['name'].lower() == target_name_or_fp.lower():
                          target_fp = fp
                          break
 
+        # 2. LOGICA OFFLINE / POSTCARDS
+        # Si peer_info es None, o la IP es "Offline" (del apaño anterior), ENCOLAMOS
         is_offline = (peer_info is None) or (peer_info.get('ip') == 'Offline')
 
         if is_offline:
             print(f"💤 Usuario offline. Mensaje encolado para {target_fp[:8]}")
+            
+            # Guardamos en la cola de memoria
             if target_fp not in self.message_queue:
                 self.message_queue[target_fp] = []
+            
             self.message_queue[target_fp].append(text)
+            
+            # Devolvemos True para que la Interfaz Gráfica muestre el mensaje
+            # como si se hubiera enviado (aunque se entregará luego)
             return True 
 
+        # 3. LOGICA ONLINE (Solo llegamos aquí si tenemos IP y Puerto)
         try:
             cid = self.connection_manager.get_cid_for_peer(target_fp)
             if not cid:
@@ -519,68 +509,41 @@ class CompleteNetwork:
             content = msgpack.unpackb(payload, raw=False)
             remote_fp = content.get('dnie_fingerprint')
             
-            # 1. Verificar firma del que inicia y obtener nombre
-            real_name_dnie = self.noise.accept_handshake(content)
-            
-            if real_name_dnie:
-                print(f"🔒 Sesión segura con {real_name_dnie} (Init Recibido)")
+            # [CORRECCIÓN] Pasamos el contenido completo al noise para validar firma
+            if self.noise.accept_handshake(content):
+                print(f"🔒 Sesión segura establecida con {self._get_clean_name(remote_fp)}")
                 
-                # GUARDAR NOMBRE (Como Receptor)
-                self._update_contact_real_name(remote_fp, real_name_dnie)
-
                 if not self.connection_manager.get_cid_for_peer(remote_fp):
                     self.connection_manager.create_connection(remote_fp, {'ip': addr[0], 'port': addr[1]})
                 
                 my_static = self.noise.static_public.public_bytes(
                     encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
                 
-                # [NUEVO] Firmar respuesta para que el otro también tenga mi nombre
-                my_sig = self.dnie.sign_data(my_static)
-
-                ack_payload = msgpack.packb({
-                    'ack': True, 
-                    'static_public': my_static,
-                    'dnie_cert_data': self.dnie.get_certificate_der(), # Certificado
-                    'dnie_signature': my_sig, # Firma
-                    'dnie_fingerprint': self.dnie.get_fingerprint()
-                })
-
+                ack_payload = msgpack.packb({'ack': True, 'static_public': my_static})
                 pkt = self.connection_manager.create_packet(cid, 0, MessageType.HANDSHAKE_RESPONSE, ack_payload)
                 self.udp_transport.sendto(pkt, addr)
             else:
-                print("⛔ Handshake fallido: Firma inválida")
+                print("⛔ Handshake fallido: Firma inválida o error crypto")
 
         except Exception as e:
             print(f"❌ Error procesando handshake: {e}")
 
     def _handle_handshake_response(self, payload, remote_fp):
+        # Se mantiene (casi) igual
         try:
             content = msgpack.unpackb(payload, raw=False)
             if content.get('ack') and remote_fp:
                 remote_static = content.get('static_public')
-                
-                # [NUEVO] Verificar también la respuesta (Bidireccional)
-                cert_data = content.get('dnie_cert_data')
-                signature = content.get('dnie_signature')
-                
-                if cert_data and signature and remote_static:
-                    # Usamos la misma función de verificación
-                    real_name_resp = self.noise.verify_identity_and_get_name(
-                        remote_static, cert_data, signature, remote_fp
-                    )
-                    if real_name_resp:
-                        print(f"✅ Identidad del Peer (Resp) verificada: {real_name_resp}")
-                        # GUARDAR NOMBRE (Como Iniciador)
-                        self._update_contact_real_name(remote_fp, real_name_resp)
-
                 if remote_static:
                     if self.noise.update_session_with_peer_key(remote_static, remote_fp):
                          print(f"✅ Handshake COMPLETADO con {self._get_clean_name(remote_fp)}")
+                         # Intentar vaciar cola si había mensajes pendientes
                          asyncio.create_task(self._flush_message_queue(remote_fp))
         except Exception as e:
             print(f"❌ Error respuesta handshake: {e}")
 
     def _handle_text(self, payload, remote_fp):
+        # Se mantiene igual
         try:
             decrypted = self.noise.decrypt_message(payload, remote_fp)
             data = msgpack.unpackb(decrypted, raw=False)
@@ -589,8 +552,14 @@ class CompleteNetwork:
             print("\n❌ Error desencriptando mensaje")
     
     def remove_discovered_peer(self, service_name):
+        # El nombre viene como "User-XYZ._dni...local.", limpiamos para buscar
+        # Nota: service_name suele ser el nombre completo del registro mDNS
+        
         fingerprint_to_remove = None
+        
         for fp, info in self.discovered.items():
+            # Comparamos si el nombre del servicio eliminado coincide con el guardado
+            # info['instance_name'] es lo que guardamos sin el sufijo ._udp.local.
             if info['instance_name'] in service_name:
                 fingerprint_to_remove = fp
                 break
@@ -598,6 +567,8 @@ class CompleteNetwork:
         if fingerprint_to_remove:
             print(f"📉 Peer desconectado detectado: {fingerprint_to_remove[:8]}")
             del self.discovered[fingerprint_to_remove]
+            # Al borrarlo de 'discovered', si está en 'contacts.json',
+            # get_peers() lo mostrará automáticamente como OFF.
         
     async def stop(self):
         if self.udp_transport: self.udp_transport.close()
