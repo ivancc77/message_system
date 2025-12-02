@@ -78,8 +78,8 @@ class NoiseIKProtocol:
         
         return msgpack.packb(handshake_message), session
 
+    # [NUEVO] Función auxiliar para verificar firma y extraer nombre limpio
     def verify_identity_and_get_name(self, static_bytes, cert_data, signature, fingerprint):
-        """Función auxiliar para verificar firma y extraer nombre real"""
         try:
             if not cert_data: return None
             
@@ -99,12 +99,14 @@ class NoiseIKProtocol:
                 hashes.SHA256()
             )
 
-            # 3. Extraer Nombre Real (CN)
+            # 3. Extraer Nombre Real (CN) y LIMPIARLO
             subject = cert.subject
             real_name = "Desconocido"
             for attr in subject:
                 if attr.oid == x509.NameOID.COMMON_NAME:
-                    real_name = attr.value
+                    raw_val = attr.value
+                    # Limpiamos la basura del nombre
+                    real_name = raw_val.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
                     break
             
             return real_name
@@ -123,14 +125,14 @@ class NoiseIKProtocol:
             signature = payload_dict['dnie_signature']
             cert_data = payload_dict.get('dnie_cert_data')
 
-            # 1. Verificar Identidad
+            # 1. Verificar Identidad usando la nueva función
             real_name = self.verify_identity_and_get_name(
                 sender_static_bytes, cert_data, signature, sender_fp
             )
             
             if not real_name:
                 print("⛔ Firma inválida en Handshake")
-                return None
+                return None # Devolvemos None si falla
 
             print(f"✅ Firma DNIe verificada. Real: {real_name}")
 
@@ -304,6 +306,7 @@ class CompleteNetwork:
     def _load_contacts(self):
         if os.path.exists(self.contacts_file):
             try:
+                # [CORRECCIÓN] utf-8 para leer
                 with open(self.contacts_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
             except: return {}
@@ -311,23 +314,21 @@ class CompleteNetwork:
 
     def _save_contacts(self):
         try:
+            # [CORRECCIÓN] utf-8 y ensure_ascii=False para guardar tildes bien
             with open(self.contacts_file, 'w', encoding='utf-8') as f:
                 json.dump(self.trusted_contacts, f, indent=4, ensure_ascii=False)
         except: pass
 
     def _update_contact_real_name(self, fp, real_name):
         """Guarda/Actualiza el nombre real en el JSON"""
-        # Limpiar basura del nombre del certificado
-        clean_real_name = real_name.replace("(AUTENTICACIÓN)", "").replace("(FIRMA)", "").strip()
-        
         if fp not in self.trusted_contacts:
             self.trusted_contacts[fp] = {
-                'name': clean_real_name, 
+                'name': real_name, 
                 'added': time.time(),
-                'dnie_real_name': clean_real_name
+                'dnie_real_name': real_name
             }
         else:
-            self.trusted_contacts[fp]['dnie_real_name'] = clean_real_name
+            self.trusted_contacts[fp]['dnie_real_name'] = real_name
         self._save_contacts()
 
     def _load_identity(self) -> X25519PrivateKey:
@@ -422,6 +423,9 @@ class CompleteNetwork:
             for fp, info in self.trusted_contacts.items():
                 if fp not in online_fps:
                     clean_name = info['name'].replace("(AUTENTICACIÓN)", "").strip()
+                    if 'dnie_real_name' in info:
+                        clean_name = info['dnie_real_name'] # Usamos el nombre real si existe
+                    
                     offline_peer = {
                         'fingerprint': fp,
                         'name': f"{clean_name} (OFF)", 
@@ -477,6 +481,7 @@ class CompleteNetwork:
             if not cid:
                 cid = self.connection_manager.create_connection(target_fp, peer_info)
                 await self._send_handshake(cid, peer_info)
+                # Pequeña espera para handshake
                 await asyncio.sleep(0.2)
                 
             sid = self.connection_manager.create_stream(cid, 'text')
@@ -514,7 +519,7 @@ class CompleteNetwork:
             content = msgpack.unpackb(payload, raw=False)
             remote_fp = content.get('dnie_fingerprint')
             
-            # [NUEVO] Recibimos el NOMBRE REAL validado
+            # 1. Verificar firma del que inicia y obtener nombre
             real_name_dnie = self.noise.accept_handshake(content)
             
             if real_name_dnie:
@@ -529,14 +534,14 @@ class CompleteNetwork:
                 my_static = self.noise.static_public.public_bytes(
                     encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
                 
-                # [NUEVO] FIRMAR LA RESPUESTA PARA BIDIRECCIONALIDAD
+                # [NUEVO] Firmar respuesta para que el otro también tenga mi nombre
                 my_sig = self.dnie.sign_data(my_static)
 
                 ack_payload = msgpack.packb({
                     'ack': True, 
                     'static_public': my_static,
-                    'dnie_cert_data': self.dnie.get_certificate_der(), # ENVIO MI CERT
-                    'dnie_signature': my_sig, # ENVIO MI FIRMA
+                    'dnie_cert_data': self.dnie.get_certificate_der(), # Certificado
+                    'dnie_signature': my_sig, # Firma
                     'dnie_fingerprint': self.dnie.get_fingerprint()
                 })
 
@@ -559,6 +564,7 @@ class CompleteNetwork:
                 signature = content.get('dnie_signature')
                 
                 if cert_data and signature and remote_static:
+                    # Usamos la misma función de verificación
                     real_name_resp = self.noise.verify_identity_and_get_name(
                         remote_static, cert_data, signature, remote_fp
                     )
@@ -566,8 +572,6 @@ class CompleteNetwork:
                         print(f"✅ Identidad del Peer (Resp) verificada: {real_name_resp}")
                         # GUARDAR NOMBRE (Como Iniciador)
                         self._update_contact_real_name(remote_fp, real_name_resp)
-                    else:
-                        print("⚠️ Respuesta de handshake con firma inválida")
 
                 if remote_static:
                     if self.noise.update_session_with_peer_key(remote_static, remote_fp):
